@@ -243,6 +243,10 @@ fn package_directory(package: &Package) -> Result<PathBuf> {
 fn build_node_napi(package: &Package, release: bool, out_dir: &Path) -> Result<()> {
     let directory = package_directory(package)?;
     let output = directory.join(out_dir).join(target_name(Target::NodeNapi));
+    if output.exists() {
+        fs::remove_dir_all(&output)
+            .with_context(|| format!("failed to clean {}", output.display()))?;
+    }
     fs::create_dir_all(&output)?;
     let mut command = Command::new("bun");
     command.current_dir(&directory).args([
@@ -290,6 +294,10 @@ fn build_wasm(package: &Package, release: bool, out_dir: &Path, target: Target) 
         .join(profile)
         .join(format!("{}.wasm", package.name.replace('-', "_")));
     let output = directory.join(out_dir).join(target_name(target));
+    if output.exists() {
+        fs::remove_dir_all(&output)
+            .with_context(|| format!("failed to clean {}", output.display()))?;
+    }
     fs::create_dir_all(&output)?;
     let mut bindgen = Command::new("wasm-bindgen");
     let (name, bindgen_target) = if target == Target::WasmBrowser {
@@ -343,6 +351,10 @@ fn generate_target(
     functions: &[Function],
 ) -> Result<()> {
     let target_dir = out_dir.join(target_name(target));
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir)
+            .with_context(|| format!("failed to clean {}", target_dir.display()))?;
+    }
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("failed to create {}", target_dir.display()))?;
     let filename = library.file_name().context("library has no filename")?;
@@ -1412,6 +1424,26 @@ mod tests {
             render_browser_wasm_declarations()
                 .contains("Promise<import(\"./bindings.js\").InitOutput>")
         );
+    }
+
+    #[test]
+    fn native_generation_removes_stale_files() {
+        let temporary = tempfile::tempdir().expect("temporary directory should exist");
+        let library = temporary.path().join(if cfg!(target_os = "windows") {
+            "fixture.dll"
+        } else if cfg!(target_os = "macos") {
+            "libfixture.dylib"
+        } else {
+            "libfixture.so"
+        });
+        fs::write(&library, b"fixture").expect("fixture library should be writable");
+        let stale = temporary.path().join("bun/index.ts");
+        fs::create_dir_all(stale.parent().expect("stale file should have parent"))
+            .expect("stale directory should be writable");
+        fs::write(&stale, b"stale").expect("stale file should be writable");
+        generate_target(Target::Bun, temporary.path(), &library, &[add_function()])
+            .expect("generation should succeed");
+        assert!(!stale.exists());
     }
 
     #[test]

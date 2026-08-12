@@ -67,7 +67,7 @@ jobs:
       - working-directory: examples/add
         run: cargo eqts build --target wasm-browser --release
       - working-directory: examples/add
-        run: bun run typecheck
+        run: bun run typecheck:wasm
       - working-directory: examples/add
         run: bun run format:check
       - working-directory: examples/add

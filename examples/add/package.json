@@ -43,6 +43,7 @@
     "test": "bun run build && bun test parity.test.ts reactive.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:native": "tsc --noEmit --project tsconfig.native.json",
+    "typecheck:wasm": "tsc --ignoreConfig --noEmit --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler --lib ESNext,DOM dist/wasm/index.d.ts dist/wasm-browser/index.d.ts",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint ."

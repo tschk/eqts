@@ -120,7 +120,10 @@ fn expand_scalar(
         &parameters,
         &result_schema,
         &quote! {
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn #wrapper(#(#inputs,)* #output) -> ::std::ffi::c_int { #invoke }
+            #[unsafe(no_mangle)]
+            #[doc = "# Safety"]
+            #[doc = "Every output pointer must be null or valid, aligned, and writable for its declared type."]
+            pub unsafe extern "C" fn #wrapper(#(#inputs,)* #output) -> ::std::ffi::c_int { #invoke }
         },
     ))
 }
@@ -162,6 +165,8 @@ fn expand_json(
         &result_schema,
         &quote! {
             #[unsafe(no_mangle)]
+            #[doc = "# Safety"]
+            #[doc = "Input must be null with zero length or readable for `len` bytes; output must be valid, aligned, and writable."]
             pub unsafe extern "C" fn #wrapper(__eqts_input: *const u8, __eqts_len: usize, __eqts_output: *mut ::eqts::OwnedBuffer) -> ::std::ffi::c_int {
                 if __eqts_output.is_null() { return ::eqts::ABI_NULL_OUTPUT; }
                 let operation = ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<::std::vec::Vec<u8>, (i32, ::std::string::String)> {

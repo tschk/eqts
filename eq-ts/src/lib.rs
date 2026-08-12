@@ -306,6 +306,8 @@ pub mod __private {
     pub use serde_json::{Value, from_slice, to_vec};
 
     #[inline]
+    #[doc = "# Safety"]
+    #[doc = "`output` must be null or valid, aligned, and writable for one `T`."]
     pub unsafe fn write_output<T>(output: *mut T, value: T) -> i32 {
         if output.is_null() {
             return ABI_NULL_OUTPUT;
@@ -334,6 +336,8 @@ macro_rules! setup {
         }
 
         #[unsafe(no_mangle)]
+        #[doc = "# Safety"]
+        #[doc = "The pointer, length, and capacity must come from one eqts output buffer and be released exactly once."]
         pub unsafe extern "C" fn eqts_buffer_free_v1(ptr: *mut u8, len: usize, capacity: usize) {
             if !ptr.is_null() {
                 // SAFETY: components originate from OwnedBuffer::from_bytes and must be returned exactly once.

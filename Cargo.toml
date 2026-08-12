@@ -1,0 +1,17 @@
+[workspace]
+members = ["eq-ts", "eqts-macros", "cargo-eqts"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "ISC"
+repository = "https://github.com/tschk/eqts"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+future-incompatible = "warn"
+nonstandard-style = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 10 }
+pedantic = { level = "warn", priority = 5 }

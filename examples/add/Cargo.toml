@@ -1,0 +1,14 @@
+[package]
+name = "eqts-example-add"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+eqts = { path = "../../eq-ts" }
+
+[workspace]
+

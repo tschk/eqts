@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true,
+    "strict": true,
+    "target": "es2022",
+    "types": ["bun"]
+  },
+  "include": [
+    "typecheck.native.ts",
+    "dist/node-koffi/**/*.d.ts",
+    "dist/bun/**/*.d.ts",
+    "dist/deno/**/*.d.ts"
+  ]
+}

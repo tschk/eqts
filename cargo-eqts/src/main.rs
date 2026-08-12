@@ -537,7 +537,13 @@ fn library_package(metadata: &Metadata) -> Result<&Package> {
 
 fn cargo_build(package: &Package, release: bool) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["build", "-p", package.name.as_str(), "--locked"]);
+    command.args([
+        "build",
+        "-p",
+        package.name.as_str(),
+        "--locked",
+        "--no-default-features",
+    ]);
     if release {
         command.arg("--release");
     }

@@ -57,7 +57,7 @@ jobs:
       - working-directory: examples/add
         run: cargo eqts build --target deno --release
       - working-directory: examples/add
-        run: bun run typecheck
+        run: bun run typecheck:native
 
   musl:
     runs-on: ubuntu-latest

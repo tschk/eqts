@@ -1,6 +1,6 @@
 [package]
 name = "cargo-eqts"
-version = "0.1.1"
+version = "0.1.2"
 description = "Build and generate TypeScript adapters for eqts crates"
 edition.workspace = true
 license.workspace = true

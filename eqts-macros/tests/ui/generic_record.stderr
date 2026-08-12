@@ -1,0 +1,5 @@
+error: eqts derived types cannot be generic
+ --> tests/ui/generic_record.rs:4:17
+  |
+4 | pub struct Value<T> {
+  |                 ^^^

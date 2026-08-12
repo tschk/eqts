@@ -1,4 +1,4 @@
-error: eqts exports require scalar value types
+error: unsupported eqts type
  --> tests/ui/borrowed.rs:4:22
   |
 4 | pub fn length(value: &str) -> u32 {

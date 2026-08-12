@@ -1,0 +1,5 @@
+error: Enum supports unit variants only
+ --> tests/ui/non_unit_enum.rs:5:11
+  |
+5 |     Number(u32),
+  |           ^^^^^

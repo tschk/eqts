@@ -3,10 +3,14 @@ use std::sync::OnceLock;
 pub use eqts_macros::{Enum, Record, export};
 pub use inventory;
 #[cfg(feature = "node-napi")]
+pub use napi;
+#[cfg(feature = "node-napi")]
 pub use napi_derive;
 pub use serde;
 #[cfg(feature = "wasm")]
 pub use wasm_bindgen;
+#[cfg(feature = "wasm")]
+pub use {js_sys, serde_wasm_bindgen};
 
 pub const ABI_OK: i32 = 0;
 pub const ABI_PANIC: i32 = 1;

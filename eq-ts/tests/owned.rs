@@ -44,3 +44,11 @@ fn invalid_input_returns_owned_error() {
     // SAFETY: wrapper allocation is returned exactly once.
     unsafe { drop(Vec::from_raw_parts(output.ptr, output.len, output.capacity)) };
 }
+
+#[test]
+fn result_error_transport_message_is_not_json_quoted() {
+    let value = <Result<String, String> as eqts::EqtsValue>::into_json(Err("busy".into()))
+        .expect("result must encode");
+    let error = __eqts_transport_greet(value).expect_err("error result must throw");
+    assert_eq!(error, "busy");
+}

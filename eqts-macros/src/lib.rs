@@ -95,6 +95,22 @@ fn expand_scalar(
         });
     }
     let result_schema = result.schema();
+    let napi_bridge = format_ident!("__eqts_napi_{name}");
+    let wasm_bridge = format_ident!("__eqts_wasm_{name}");
+    let js_name = syn::LitStr::new(&camel_case(&name.to_string()), name.span());
+    let direct_inputs = arguments
+        .iter()
+        .map(|argument| {
+            let ident = plain_ident(argument).expect("validated parameter");
+            let ty = &argument.ty;
+            quote!(#ident: #ty)
+        })
+        .collect::<Vec<_>>();
+    let direct_calls = arguments
+        .iter()
+        .map(|argument| plain_ident(argument).expect("validated parameter"))
+        .collect::<Vec<_>>();
+    let direct_output = &function.sig.output;
     let (output, invoke) = if matches!(result, TypeKind::Void) {
         (
             quote!(),
@@ -120,6 +136,14 @@ fn expand_scalar(
         &parameters,
         &result_schema,
         &quote! {
+            #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
+            #[::eqts::napi_derive::napi(js_name = #js_name)]
+            fn #napi_bridge(#(#direct_inputs),*) #direct_output { #name(#(#direct_calls),*) }
+
+            #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
+            #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
+            pub fn #wasm_bridge(#(#direct_inputs),*) #direct_output { #name(#(#direct_calls),*) }
+
             #[unsafe(no_mangle)]
             #[doc = "# Safety"]
             #[doc = "Every output pointer must be null or valid, aligned, and writable for its declared type."]
@@ -139,6 +163,10 @@ fn expand_json(
     let mut parameters = Vec::new();
     let mut conversions = Vec::new();
     let mut calls = Vec::new();
+    let mut napi_inputs = Vec::new();
+    let mut napi_values = Vec::new();
+    let mut wasm_inputs = Vec::new();
+    let mut wasm_values = Vec::new();
     for (index, (argument, kind)) in arguments.iter().zip(typed).enumerate() {
         let ident = plain_ident(argument)?;
         let ty = &argument.ty;
@@ -146,8 +174,13 @@ fn expand_json(
         let index = syn::Index::from(index);
         parameters.push(quote!(::eqts::Parameter { name: stringify!(#ident), ty: #schema }));
         calls.push(ident);
+        let transport_ident = format_ident!("__eqts_{ident}");
+        napi_inputs.push(quote!(#transport_ident: ::eqts::__private::Value));
+        napi_values.push(quote!(#transport_ident));
+        wasm_inputs.push(quote!(#transport_ident: ::eqts::wasm_bindgen::JsValue));
+        wasm_values.push(quote!(::eqts::serde_wasm_bindgen::from_value(#transport_ident).map_err(|error| error.to_string())?));
         conversions.push(
-            quote!(let #ident = <#ty as ::eqts::EqtsValue>::from_json(values[#index].take()).map_err(|error| (::eqts::ABI_INVALID_INPUT, error))?;),
+            quote!(let #ident = <#ty as ::eqts::EqtsValue>::from_json(values[#index].take())?;),
         );
     }
     let count = arguments.len();
@@ -156,6 +189,12 @@ fn expand_json(
         ReturnType::Type(_, ty) => quote!(#ty),
     };
     let result_schema = result.schema();
+    let bridge = format_ident!("__eqts_bridge_{name}");
+    let transport = format_ident!("__eqts_transport_{name}");
+    let napi_bridge = format_ident!("__eqts_napi_{name}");
+    let wasm_bridge = format_ident!("__eqts_wasm_{name}");
+    let js_name = syn::LitStr::new(&camel_case(&name.to_string()), name.span());
+    let transport_result = transport_result(result);
     Ok(registration(
         function,
         name,
@@ -164,6 +203,35 @@ fn expand_json(
         &parameters,
         &result_schema,
         &quote! {
+            fn #bridge(mut values: ::std::vec::Vec<::eqts::__private::Value>) -> ::std::result::Result<::eqts::__private::Value, ::std::string::String> {
+                if values.len() != #count { return Err(format!("expected {} arguments, got {}", #count, values.len())); }
+                #(#conversions)*
+                let value: #result_ty = #name(#(#calls),*);
+                let value = <#result_ty as ::eqts::EqtsValue>::into_json(value)?;
+                Ok(value)
+            }
+
+            fn #transport(value: ::eqts::__private::Value) -> ::std::result::Result<::eqts::__private::Value, ::std::string::String> {
+                #transport_result
+            }
+
+            #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
+            #[::eqts::napi_derive::napi(js_name = #js_name)]
+            fn #napi_bridge(#(#napi_inputs),*) -> ::eqts::napi::Result<::eqts::__private::Value> {
+                let value = #bridge(vec![#(#napi_values),*]).and_then(#transport);
+                value.map_err(::eqts::napi::Error::from_reason)
+            }
+
+            #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
+            #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
+            pub fn #wasm_bridge(#(#wasm_inputs),*) -> ::std::result::Result<::eqts::wasm_bindgen::JsValue, ::eqts::wasm_bindgen::JsValue> {
+                let values = (|| -> ::std::result::Result<_, ::std::string::String> { Ok(vec![#(#wasm_values),*]) })()
+                    .map_err(|error| ::eqts::js_sys::Error::new(&error))?;
+                let value = #bridge(values).and_then(#transport).map_err(|error| ::eqts::js_sys::Error::new(&error))?;
+                let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                ::eqts::serde::Serialize::serialize(&value, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+            }
+
             #[unsafe(no_mangle)]
             #[doc = "# Safety"]
             #[doc = "Input must be null with zero length or readable for `len` bytes; output must be valid, aligned, and writable."]
@@ -172,11 +240,8 @@ fn expand_json(
                 let operation = ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<::std::vec::Vec<u8>, (i32, ::std::string::String)> {
                     if __eqts_input.is_null() && __eqts_len != 0 { return Err((::eqts::ABI_INVALID_INPUT, "null input".into())); }
                     let input = if __eqts_len == 0 { &[][..] } else { unsafe { ::std::slice::from_raw_parts(__eqts_input, __eqts_len) } };
-                    let mut values: ::std::vec::Vec<::eqts::__private::Value> = ::eqts::__private::from_slice(input).map_err(|error| (::eqts::ABI_INVALID_INPUT, error.to_string()))?;
-                    if values.len() != #count { return Err((::eqts::ABI_INVALID_INPUT, format!("expected {} arguments, got {}", #count, values.len()))); }
-                    #(#conversions)*
-                    let value: #result_ty = #name(#(#calls),*);
-                    let value = <#result_ty as ::eqts::EqtsValue>::into_json(value).map_err(|error| (::eqts::ABI_ENCODE_ERROR, error))?;
+                    let values: ::std::vec::Vec<::eqts::__private::Value> = ::eqts::__private::from_slice(input).map_err(|error| (::eqts::ABI_INVALID_INPUT, error.to_string()))?;
+                    let value = #bridge(values).map_err(|error| (::eqts::ABI_INVALID_INPUT, error))?;
                     ::eqts::__private::to_vec(&value).map_err(|error| (::eqts::ABI_ENCODE_ERROR, error.to_string()))
                 }));
                 match operation {
@@ -187,6 +252,23 @@ fn expand_json(
             }
         },
     ))
+}
+
+fn transport_result(result: &TypeKind) -> proc_macro2::TokenStream {
+    if matches!(result, TypeKind::Result(_, _)) {
+        quote! {
+            let ::eqts::__private::Value::Object(mut object) = value else { return Err("invalid Result encoding".into()); };
+            if let Some(error) = object.remove("error") {
+                return Err(match error {
+                    ::eqts::__private::Value::String(message) => message,
+                    value => value.to_string(),
+                });
+            }
+            object.remove("ok").ok_or_else(|| "invalid Result encoding".into())
+        }
+    } else {
+        quote!(Ok(value))
+    }
 }
 
 fn registration(
@@ -466,4 +548,39 @@ fn one_argument(segment: &syn::PathSegment) -> syn::Result<&Type> {
         ));
     };
     Ok(ty)
+}
+
+fn camel_case(value: &str) -> String {
+    let mut uppercase = false;
+    value
+        .chars()
+        .filter_map(|character| {
+            if character == '_' {
+                uppercase = true;
+                None
+            } else if uppercase {
+                uppercase = false;
+                Some(character.to_ascii_uppercase())
+            } else {
+                Some(character)
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rich_bridge_uses_plain_wasm_objects_and_unquoted_string_errors() {
+        let function: ItemFn = syn::parse_quote! {
+            pub fn make_value(value: String) -> Result<String, String> { Ok(value) }
+        };
+        let output = expand_export(&function)
+            .expect("rich export must expand")
+            .to_string();
+        assert!(output.contains("serialize_maps_as_objects"));
+        assert!(output.contains("Value :: String (message) => message"));
+    }
 }

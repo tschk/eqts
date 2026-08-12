@@ -4,6 +4,23 @@
   "private": true,
   "type": "module",
   "exports": {
+    ".": {
+      "types": "./dist/node-napi/index.d.ts",
+      "node": "./dist/node-napi/index.js",
+      "default": "./dist/wasm-browser/index.js"
+    },
+    "./bun": {
+      "types": "./dist/bun/index.d.ts",
+      "default": "./dist/bun/index.js"
+    },
+    "./deno": {
+      "types": "./dist/deno/index.d.ts",
+      "default": "./dist/deno/index.js"
+    },
+    "./node-koffi": {
+      "types": "./dist/node-koffi/index.d.ts",
+      "default": "./dist/node-koffi/index.js"
+    },
     "./node-napi": {
       "types": "./dist/node-napi/index.d.ts",
       "import": "./dist/node-napi/index.js"
@@ -11,12 +28,18 @@
     "./wasm": {
       "types": "./dist/wasm/index.d.ts",
       "default": "./dist/wasm/index.js"
+    },
+    "./wasm-browser": {
+      "types": "./dist/wasm-browser/index.d.ts",
+      "default": "./dist/wasm-browser/index.js"
     }
   },
   "scripts": {
-    "build:napi": "napi build --platform --release --output-dir dist/node-napi --js index.js --dts index.d.ts --esm",
-    "build:wasm": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm && wasm-bindgen target/wasm32-unknown-unknown/release/eqts_example_add.wasm --out-dir dist/wasm --out-name index --target nodejs",
-    "build": "bun run build:napi && bun run build:wasm",
+    "build:napi": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target node-napi --release --out-dir dist",
+    "build:wasm": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target wasm --release --out-dir dist",
+    "build:ffi": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target bun --release --out-dir dist && cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target deno --release --out-dir dist && cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target node-koffi --release --out-dir dist",
+    "build:browser": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target wasm-browser --release --out-dir dist",
+    "build": "bun run build:napi && bun run build:wasm && bun run build:ffi && bun run build:browser",
     "test": "bun run build && bun test parity.test.ts",
     "typecheck": "tsc --noEmit"
   },

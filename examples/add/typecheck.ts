@@ -3,6 +3,7 @@ import * as wasm from "@tschk/eqts-example-add/wasm";
 import * as bunFfi from "./dist/bun/index.js";
 import * as denoFfi from "./dist/deno/index.js";
 import * as koffi from "./dist/node-koffi/index.js";
+import type * as browserWasm from "./dist/wasm-browser/index.js";
 
 const napiResult: number = napi.add(20, 22);
 const wasmResult: number = wasm.add(20, 22);
@@ -14,6 +15,7 @@ const koffiPerson: koffi.Person = koffi.makePerson("Ada", 36);
 const nativeBytes: Uint8Array = bunFfi.reverseBytes(new Uint8Array([1, 2, 3]));
 const nativeOption: string | null = denoFfi.maybeName(true);
 const nativeStatus: koffi.Status = koffi.currentStatus();
+const browserStatus: browserWasm.Status = "Ready";
 
 if (
   napiResult !== wasmResult ||
@@ -22,7 +24,8 @@ if (
   denoPerson.name !== koffiPerson.name ||
   nativeBytes.length !== 3 ||
   nativeOption !== "eqts" ||
-  nativeStatus !== "Ready"
+  nativeStatus !== "Ready" ||
+  browserStatus !== "Ready"
 ) {
   throw new Error("backend parity failed");
 }

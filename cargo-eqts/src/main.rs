@@ -181,23 +181,25 @@ fn build(target: Target, release: bool, out_dir: &Path) -> Result<()> {
     let targets = selected_targets(target);
     let metadata = MetadataCommand::new().exec()?;
     let package = library_package(&metadata)?;
+    cargo_build(package, release)?;
+    let library = library_path(&metadata, package, release)?;
+    let functions = normalized_metadata(load_metadata(&library)?)?;
     let native_targets = targets
         .iter()
         .copied()
         .filter(|target| matches!(target, Target::NodeKoffi | Target::Bun | Target::Deno))
         .collect::<Vec<_>>();
     if !native_targets.is_empty() {
-        cargo_build(package, release)?;
-        let library = library_path(&metadata, package, release)?;
-        let functions = normalized_metadata(load_metadata(&library)?)?;
         for target in native_targets {
             generate_target(target, out_dir, &library, &functions)?;
         }
     }
     for target in targets {
         match target {
-            Target::NodeNapi => build_node_napi(package, release, out_dir)?,
-            Target::Wasm | Target::WasmBrowser => build_wasm(package, release, out_dir, target)?,
+            Target::NodeNapi => build_node_napi(package, release, out_dir, &functions)?,
+            Target::Wasm | Target::WasmBrowser => {
+                build_wasm(package, release, out_dir, target, &functions)?;
+            }
             Target::NodeKoffi | Target::Bun | Target::Deno | Target::All => {}
         }
     }
@@ -240,7 +242,12 @@ fn package_directory(package: &Package) -> Result<PathBuf> {
         .context("package manifest has no parent directory")
 }
 
-fn build_node_napi(package: &Package, release: bool, out_dir: &Path) -> Result<()> {
+fn build_node_napi(
+    package: &Package,
+    release: bool,
+    out_dir: &Path,
+    functions: &[Function],
+) -> Result<()> {
     let directory = package_directory(package)?;
     let output = directory.join(out_dir).join(target_name(Target::NodeNapi));
     if output.exists() {
@@ -269,10 +276,30 @@ fn build_node_napi(package: &Package, release: bool, out_dir: &Path) -> Result<(
     if release {
         command.arg("--release");
     }
-    run_backend(command, "napi-rs")
+    run_backend(command, "napi-rs")?;
+    fs::rename(output.join("index.js"), output.join("bindings.js"))?;
+    if output.join("index.d.ts").exists() {
+        fs::rename(output.join("index.d.ts"), output.join("bindings.d.ts"))?;
+    }
+    fs::write(
+        output.join("index.js"),
+        render_bridge_loader(BridgeRuntime::NodeNapi, functions),
+    )?;
+    fs::write(output.join("index.d.ts"), render_declarations(functions))?;
+    fs::write(
+        output.join("package.json"),
+        render_package_manifest(Target::NodeNapi)?,
+    )?;
+    Ok(())
 }
 
-fn build_wasm(package: &Package, release: bool, out_dir: &Path, target: Target) -> Result<()> {
+fn build_wasm(
+    package: &Package,
+    release: bool,
+    out_dir: &Path,
+    target: Target,
+    functions: &[Function],
+) -> Result<()> {
     let directory = package_directory(package)?;
     let mut cargo = Command::new("cargo");
     cargo.current_dir(&directory).args([
@@ -303,7 +330,7 @@ fn build_wasm(package: &Package, release: bool, out_dir: &Path, target: Target) 
     let (name, bindgen_target) = if target == Target::WasmBrowser {
         ("bindings", "web")
     } else {
-        ("index", "nodejs")
+        ("bindings", "nodejs")
     };
     bindgen
         .current_dir(&directory)
@@ -312,26 +339,119 @@ fn build_wasm(package: &Package, release: bool, out_dir: &Path, target: Target) 
         .arg(&output)
         .args(["--out-name", name, "--target", bindgen_target]);
     run_backend(bindgen, "wasm-bindgen")?;
-    if target == Target::WasmBrowser {
-        fs::write(output.join("index.js"), render_browser_wasm_loader())?;
-        fs::write(
-            output.join("index.d.ts"),
-            render_browser_wasm_declarations(),
-        )?;
-        fs::write(
-            output.join("package.json"),
-            render_package_manifest(Target::WasmBrowser)?,
-        )?;
+    if target == Target::Wasm {
+        fs::rename(output.join("bindings.js"), output.join("bindings.cjs"))?;
     }
+    fs::write(
+        output.join("index.js"),
+        render_bridge_loader(
+            if target == Target::WasmBrowser {
+                BridgeRuntime::WasmBrowser
+            } else {
+                BridgeRuntime::WasmNode
+            },
+            functions,
+        ),
+    )?;
+    let mut declarations = render_declarations(functions);
+    if target == Target::WasmBrowser {
+        declarations.push_str(
+            "export declare function initialize(input?: import(\"./bindings.js\").InitInput | Promise<import(\"./bindings.js\").InitInput>): Promise<import(\"./bindings.js\").InitOutput>;\n",
+        );
+    }
+    fs::write(output.join("index.d.ts"), declarations)?;
+    fs::write(
+        output.join("package.json"),
+        render_package_manifest(target)?,
+    )?;
     Ok(())
 }
 
-fn render_browser_wasm_loader() -> &'static str {
-    "import init, * as bindings from \"./bindings.js\";\n\nlet ready;\n\nexport function initialize(input = new URL(\"./bindings_bg.wasm\", import.meta.url)) {\n  return ready ??= init({ module_or_path: input });\n}\n\nexport { bindings };\nexport * from \"./bindings.js\";\n"
+#[derive(Clone, Copy)]
+enum BridgeRuntime {
+    NodeNapi,
+    WasmNode,
+    WasmBrowser,
 }
 
-fn render_browser_wasm_declarations() -> &'static str {
-    "export function initialize(input?: import(\"./bindings.js\").InitInput | Promise<import(\"./bindings.js\").InitInput>): Promise<import(\"./bindings.js\").InitOutput>;\nexport * as bindings from \"./bindings.js\";\nexport * from \"./bindings.js\";\n"
+fn render_bridge_loader(runtime: BridgeRuntime, functions: &[Function]) -> String {
+    let mut output = match runtime {
+        BridgeRuntime::NodeNapi => {
+            "import * as bindings from \"./bindings.js\";\n\n".to_string()
+        }
+        BridgeRuntime::WasmNode => {
+            "import bindings from \"./bindings.cjs\";\n\n".to_string()
+        }
+        BridgeRuntime::WasmBrowser => "import init, * as bindings from \"./bindings.js\";\n\nlet ready;\n\nexport function initialize(input = new URL(\"./bindings_bg.wasm\", import.meta.url)) {\n  return ready ??= init({ module_or_path: input });\n}\n\n".to_string(),
+    };
+    output.push_str("function __eqtsNormalize(value) {\n  if (value instanceof Map) return Object.fromEntries(Array.from(value, ([key, entry]) => [key, __eqtsNormalize(entry)]));\n  if (Array.isArray(value)) return value.map(__eqtsNormalize);\n  return value;\n}\n\n");
+    if functions
+        .iter()
+        .any(|function| matches!(function.result, Type::Owned(OwnedType::Result { .. })))
+    {
+        output.push_str("export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\n");
+    }
+    for function in functions {
+        render_bridge_function(&mut output, function);
+    }
+    output
+}
+
+fn render_bridge_function(output: &mut String, function: &Function) {
+    let name = typescript_name(&function.name);
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|parameter| typescript_name(&parameter.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = function
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let name = typescript_name(&parameter.name);
+            if function.abi == FunctionAbi::Json {
+                wire_encode(&name, &parameter.ty)
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(output, "export function {name}({parameters}) {{")
+        .expect("writing to a string cannot fail");
+    if let Type::Owned(OwnedType::Result { ok, .. }) = &function.result {
+        output.push_str("  try {\n");
+        writeln!(
+            output,
+            "    const __eqtsResult = __eqtsNormalize(bindings.{name}({arguments}));"
+        )
+        .expect("writing to a string cannot fail");
+        writeln!(output, "    return {};", wire_decode("__eqtsResult", ok))
+            .expect("writing to a string cannot fail");
+        output.push_str("  } catch (__eqtsCaught) {\n    let __eqtsDetail = __eqtsCaught?.message ?? String(__eqtsCaught);\n    try { __eqtsDetail = JSON.parse(__eqtsDetail); } catch {}\n    throw new EqtsError(\"RUST_ERROR\", __eqtsDetail);\n  }\n");
+    } else if matches!(function.result, Type::Scalar(Scalar::Void)) {
+        writeln!(output, "  bindings.{name}({arguments});")
+            .expect("writing to a string cannot fail");
+    } else {
+        let expression = format!("bindings.{name}({arguments})");
+        if function.abi == FunctionAbi::Json {
+            writeln!(
+                output,
+                "  const __eqtsResult = __eqtsNormalize({expression});"
+            )
+            .expect("writing to a string cannot fail");
+            writeln!(
+                output,
+                "  return {};",
+                wire_decode("__eqtsResult", &function.result)
+            )
+            .expect("writing to a string cannot fail");
+        } else {
+            writeln!(output, "  return {expression};").expect("writing to a string cannot fail");
+        }
+    }
+    output.push_str("}\n");
 }
 
 fn run_backend(mut command: Command, name: &str) -> Result<()> {
@@ -909,64 +1029,64 @@ fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtim
     .expect("writing to a string cannot fail");
     writeln!(
         output,
-        "  const input = new TextEncoder().encode(JSON.stringify([{inputs}]));"
+        "  const __eqtsInput = new TextEncoder().encode(JSON.stringify([{inputs}]));"
     )
     .expect("writing to a string cannot fail");
     match runtime {
         Runtime::Koffi => {
-            output.push_str("  const output = {};\n");
+            output.push_str("  const __eqtsOutput = {};\n");
             writeln!(
                 output,
-                "  const status = __eqts_{}(input, input.byteLength, output);",
+                "  const __eqtsStatus = __eqts_{}(__eqtsInput, __eqtsInput.byteLength, __eqtsOutput);",
                 function.name
             )
             .expect("writing to a string cannot fail");
-            output.push_str("  let text = \"\";\n  try {\n    if (output.ptr) text = koffi.decode(output.ptr, \"char\", Number(output.len));\n  } finally {\n    if (output.ptr) __eqtsBufferFree(output.ptr, output.len, output.capacity);\n  }\n");
+            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput.ptr) __eqtsText = koffi.decode(__eqtsOutput.ptr, \"char\", Number(__eqtsOutput.len));\n  } finally {\n    if (__eqtsOutput.ptr) __eqtsBufferFree(__eqtsOutput.ptr, __eqtsOutput.len, __eqtsOutput.capacity);\n  }\n");
         }
         Runtime::Bun => {
-            output.push_str("  const output = new BigUint64Array(3);\n");
+            output.push_str("  const __eqtsOutput = new BigUint64Array(3);\n");
             writeln!(
                 output,
-                "  const status = symbols.{}(ptr(input), BigInt(input.byteLength), ptr(output));",
+                "  const __eqtsStatus = symbols.{}(ptr(__eqtsInput), BigInt(__eqtsInput.byteLength), ptr(__eqtsOutput));",
                 function.symbol
             )
             .expect("writing to a string cannot fail");
-            output.push_str("  let text = \"\";\n  try {\n    if (output[0] !== 0n) {\n      const bytes = new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice();\n      text = new TextDecoder().decode(bytes);\n    }\n  } finally {\n    if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]);\n  }\n");
+            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput[0] !== 0n) {\n      const __eqtsBytes = new Uint8Array(toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))).slice();\n      __eqtsText = new TextDecoder().decode(__eqtsBytes);\n    }\n  } finally {\n    if (__eqtsOutput[0] !== 0n) symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
         }
         Runtime::Deno => {
-            output.push_str("  const output = new BigUint64Array(3);\n");
+            output.push_str("  const __eqtsOutput = new BigUint64Array(3);\n");
             writeln!(
                 output,
-                "  const status = symbols.{}(input, BigInt(input.byteLength), output);",
+                "  const __eqtsStatus = symbols.{}(__eqtsInput, BigInt(__eqtsInput.byteLength), __eqtsOutput);",
                 function.symbol
             )
             .expect("writing to a string cannot fail");
-            output.push_str("  const pointer = output[0] === 0n ? null : Deno.UnsafePointer.create(output[0]);\n  let text = \"\";\n  try {\n    if (pointer) {\n      const bytes = new Uint8Array(new Deno.UnsafePointerView(pointer).getArrayBuffer(Number(output[1]))).slice();\n      text = new TextDecoder().decode(bytes);\n    }\n  } finally {\n    if (pointer) symbols.eqts_buffer_free_v1(pointer, output[1], output[2]);\n  }\n");
+            output.push_str("  const __eqtsPointer = __eqtsOutput[0] === 0n ? null : Deno.UnsafePointer.create(__eqtsOutput[0]);\n  let __eqtsText = \"\";\n  try {\n    if (__eqtsPointer) {\n      const __eqtsBytes = new Uint8Array(new Deno.UnsafePointerView(__eqtsPointer).getArrayBuffer(Number(__eqtsOutput[1]))).slice();\n      __eqtsText = new TextDecoder().decode(__eqtsBytes);\n    }\n  } finally {\n    if (__eqtsPointer) symbols.eqts_buffer_free_v1(__eqtsPointer, __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
         }
     }
     writeln!(
         output,
-        "  checkStatus(status, \"{}\", text);",
+        "  checkStatus(__eqtsStatus, \"{}\", __eqtsText);",
         function.name
     )
     .expect("writing to a string cannot fail");
     if matches!(function.result, Type::Scalar(Scalar::Void)) {
         output.push_str("  return;\n");
     } else {
-        output.push_str("  const decoded = JSON.parse(text);\n");
+        output.push_str("  const __eqtsDecoded = JSON.parse(__eqtsText);\n");
         match &function.result {
             Type::Owned(OwnedType::Result { ok, error }) => {
                 writeln!(
                     output,
-                    "  if (Object.hasOwn(decoded, \"error\")) throw new EqtsError(\"RUST_ERROR\", {});",
-                    wire_decode("decoded.error", error)
+                    "  if (Object.hasOwn(__eqtsDecoded, \"error\")) throw new EqtsError(\"RUST_ERROR\", {});",
+                    wire_decode("__eqtsDecoded.error", error)
                 )
                 .expect("writing to a string cannot fail");
-                writeln!(output, "  return {};", wire_decode("decoded.ok", ok))
+                writeln!(output, "  return {};", wire_decode("__eqtsDecoded.ok", ok))
                     .expect("writing to a string cannot fail");
             }
             ty => {
-                writeln!(output, "  return {};", wire_decode("decoded", ty))
+                writeln!(output, "  return {};", wire_decode("__eqtsDecoded", ty))
                     .expect("writing to a string cannot fail");
             }
         }
@@ -1415,15 +1535,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_wasm_loader_initializes_once_and_reexports_bindings() {
-        let loader = render_browser_wasm_loader();
+    fn browser_wasm_loader_initializes_once() {
+        let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[add_function()]);
         assert!(loader.contains("ready ??= init({ module_or_path: input })"));
         assert!(loader.contains("new URL(\"./bindings_bg.wasm\", import.meta.url)"));
-        assert!(loader.contains("export * from \"./bindings.js\""));
-        assert!(
-            render_browser_wasm_declarations()
-                .contains("Promise<import(\"./bindings.js\").InitOutput>")
-        );
+        assert!(loader.contains("export function add(a, b)"));
+        assert!(!loader.contains("export * from \"./bindings.js\""));
     }
 
     #[test]
@@ -1563,18 +1680,91 @@ mod tests {
         let function = owned_function();
         let koffi = render_koffi("./libfixture.dylib", std::slice::from_ref(&function));
         assert!(koffi.contains("koffi.out(koffi.pointer(OwnedBuffer))"));
-        assert!(koffi.contains("__eqtsBufferFree(output.ptr, output.len, output.capacity)"));
+        assert!(koffi.contains(
+            "__eqtsBufferFree(__eqtsOutput.ptr, __eqtsOutput.len, __eqtsOutput.capacity)"
+        ));
         assert!(koffi.contains("person.id.toString()"));
-        assert!(koffi.contains("BigInt(decoded.ok.id)"));
+        assert!(koffi.contains("BigInt(__eqtsDecoded.ok.id)"));
 
         let bun = render_bun("./libfixture.dylib", std::slice::from_ref(&function));
         assert!(bun.contains("new BigUint64Array(3)"));
-        assert!(bun.contains("toArrayBuffer(Number(output[0]), 0, Number(output[1]))"));
-        assert!(bun.contains("symbols.eqts_buffer_free_v1(output[0], output[1], output[2])"));
+        assert!(bun.contains("toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))"));
+        assert!(bun.contains(
+            "symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2])"
+        ));
 
         let deno = render_deno("./libfixture.dylib", &[function]);
-        assert!(deno.contains("Deno.UnsafePointer.create(output[0])"));
-        assert!(deno.contains("symbols.eqts_buffer_free_v1(pointer, output[1], output[2])"));
+        assert!(deno.contains("Deno.UnsafePointer.create(__eqtsOutput[0])"));
+        assert!(deno.contains(
+            "symbols.eqts_buffer_free_v1(__eqtsPointer, __eqtsOutput[1], __eqtsOutput[2])"
+        ));
+    }
+
+    #[test]
+    fn json_loader_internal_names_do_not_collide_with_parameters() {
+        let function = Function {
+            module: "fixture".to_string(),
+            name: "collision".to_string(),
+            symbol: "eqts_collision".to_string(),
+            abi: FunctionAbi::Json,
+            parameters: [
+                "input", "output", "status", "text", "decoded", "bytes", "pointer",
+            ]
+            .into_iter()
+            .map(|name| Parameter {
+                name: name.to_string(),
+                ty: Type::Owned(OwnedType::String),
+            })
+            .collect(),
+            result: Type::Owned(OwnedType::String),
+        };
+        for loader in [
+            render_koffi("./libfixture.dylib", std::slice::from_ref(&function)),
+            render_bun("./libfixture.dylib", std::slice::from_ref(&function)),
+            render_deno("./libfixture.dylib", std::slice::from_ref(&function)),
+        ] {
+            assert!(loader.contains("const __eqtsInput"));
+            assert!(loader.contains("const __eqtsOutput"));
+            assert!(!loader.contains("const input ="));
+            assert!(!loader.contains("const output ="));
+        }
+    }
+
+    #[test]
+    fn napi_and_wasm_bridges_normalize_owned_values() {
+        let function = owned_function();
+        let napi = render_bridge_loader(BridgeRuntime::NodeNapi, std::slice::from_ref(&function));
+        assert!(napi.contains("import * as bindings from \"./bindings.js\""));
+        assert!(napi.contains("person.id.toString()"));
+        assert!(napi.contains("BigInt(__eqtsResult.id)"));
+        assert!(napi.contains("throw new EqtsError(\"RUST_ERROR\", __eqtsDetail)"));
+        assert!(napi.contains("JSON.parse(__eqtsDetail)"));
+        assert!(napi.contains("Object.fromEntries"));
+
+        let wasm = render_bridge_loader(BridgeRuntime::WasmNode, &[function]);
+        assert!(wasm.contains("import bindings from \"./bindings.cjs\""));
+        assert!(wasm.contains("export class EqtsError"));
+    }
+
+    #[test]
+    fn bridge_converts_bytes_and_options_to_canonical_values() {
+        let function = Function {
+            module: "fixture".to_string(),
+            name: "maybe_bytes".to_string(),
+            symbol: "eqts_maybe_bytes".to_string(),
+            abi: FunctionAbi::Json,
+            parameters: vec![Parameter {
+                name: "value".to_string(),
+                ty: Type::Owned(OwnedType::Bytes),
+            }],
+            result: Type::Owned(OwnedType::Option {
+                value: Box::new(Type::Owned(OwnedType::Bytes)),
+            }),
+        };
+        let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[function]);
+        assert!(loader.contains("Array.from(value)"));
+        assert!(loader.contains("Uint8Array.from"));
+        assert!(loader.contains("== null ? null"));
     }
 
     #[test]

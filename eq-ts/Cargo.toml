@@ -10,11 +10,13 @@ rust-version.workspace = true
 [dependencies]
 eqts-macros = { path = "../eqts-macros", version = "0.1.0" }
 inventory = "0.3"
-napi = { version = "=3.12.1", default-features = false, features = ["napi4"], optional = true }
+napi = { version = "=3.12.1", default-features = false, features = ["napi4", "serde-json"], optional = true }
 napi-derive = { version = "=3.6.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasm-bindgen = { version = "=0.2.121", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [features]
 default = ["node-napi"]
@@ -22,7 +24,7 @@ node-napi = ["dep:napi", "dep:napi-derive"]
 node-koffi = []
 bun = []
 deno = []
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:js-sys"]
 
 [lints]
 workspace = true

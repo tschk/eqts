@@ -43,6 +43,7 @@ enum Target {
     Deno,
     NodeNapi,
     Wasm,
+    WasmBrowser,
     All,
 }
 
@@ -196,7 +197,7 @@ fn build(target: Target, release: bool, out_dir: &Path) -> Result<()> {
     for target in targets {
         match target {
             Target::NodeNapi => build_node_napi(package, release, out_dir)?,
-            Target::Wasm => build_wasm(package, release, out_dir)?,
+            Target::Wasm | Target::WasmBrowser => build_wasm(package, release, out_dir, target)?,
             Target::NodeKoffi | Target::Bun | Target::Deno | Target::All => {}
         }
     }
@@ -212,7 +213,12 @@ fn build(target: Target, release: bool, out_dir: &Path) -> Result<()> {
 
 fn selected_targets(target: Target) -> Vec<Target> {
     match target {
-        Target::NodeKoffi | Target::Bun | Target::Deno | Target::NodeNapi | Target::Wasm => {
+        Target::NodeKoffi
+        | Target::Bun
+        | Target::Deno
+        | Target::NodeNapi
+        | Target::Wasm
+        | Target::WasmBrowser => {
             vec![target]
         }
         Target::All => vec![
@@ -221,6 +227,7 @@ fn selected_targets(target: Target) -> Vec<Target> {
             Target::Deno,
             Target::NodeNapi,
             Target::Wasm,
+            Target::WasmBrowser,
         ],
     }
 }
@@ -256,7 +263,7 @@ fn build_node_napi(package: &Package, release: bool, out_dir: &Path) -> Result<(
     run_backend(command, "napi-rs")
 }
 
-fn build_wasm(package: &Package, release: bool, out_dir: &Path) -> Result<()> {
+fn build_wasm(package: &Package, release: bool, out_dir: &Path, target: Target) -> Result<()> {
     let directory = package_directory(package)?;
     let mut cargo = Command::new("cargo");
     cargo.current_dir(&directory).args([
@@ -277,16 +284,41 @@ fn build_wasm(package: &Package, release: bool, out_dir: &Path) -> Result<()> {
         .join("target/wasm32-unknown-unknown")
         .join(profile)
         .join(format!("{}.wasm", package.name.replace('-', "_")));
-    let output = directory.join(out_dir).join(target_name(Target::Wasm));
+    let output = directory.join(out_dir).join(target_name(target));
     fs::create_dir_all(&output)?;
     let mut bindgen = Command::new("wasm-bindgen");
+    let (name, bindgen_target) = if target == Target::WasmBrowser {
+        ("bindings", "web")
+    } else {
+        ("index", "nodejs")
+    };
     bindgen
         .current_dir(&directory)
         .arg(wasm)
         .args(["--out-dir"])
-        .arg(output)
-        .args(["--out-name", "index", "--target", "nodejs"]);
-    run_backend(bindgen, "wasm-bindgen")
+        .arg(&output)
+        .args(["--out-name", name, "--target", bindgen_target]);
+    run_backend(bindgen, "wasm-bindgen")?;
+    if target == Target::WasmBrowser {
+        fs::write(output.join("index.js"), render_browser_wasm_loader())?;
+        fs::write(
+            output.join("index.d.ts"),
+            render_browser_wasm_declarations(),
+        )?;
+        fs::write(
+            output.join("package.json"),
+            render_package_manifest(Target::WasmBrowser)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_browser_wasm_loader() -> &'static str {
+    "import init, * as bindings from \"./bindings.js\";\n\nlet ready;\n\nexport function initialize(input = new URL(\"./bindings_bg.wasm\", import.meta.url)) {\n  return ready ??= init({ module_or_path: input });\n}\n\nexport { bindings };\nexport * from \"./bindings.js\";\n"
+}
+
+fn render_browser_wasm_declarations() -> &'static str {
+    "export function initialize(input?: import(\"./bindings.js\").InitInput | Promise<import(\"./bindings.js\").InitInput>): Promise<import(\"./bindings.js\").InitOutput>;\nexport * as bindings from \"./bindings.js\";\nexport * from \"./bindings.js\";\n"
 }
 
 fn run_backend(mut command: Command, name: &str) -> Result<()> {
@@ -574,6 +606,7 @@ fn target_name(target: Target) -> &'static str {
         Target::Deno => "deno",
         Target::NodeNapi => "node-napi",
         Target::Wasm => "wasm",
+        Target::WasmBrowser => "wasm-browser",
         Target::All => "all",
     }
 }
@@ -678,7 +711,7 @@ fn render_loader(
         Target::NodeKoffi => Ok(render_koffi(&path, functions)),
         Target::Bun => Ok(render_bun(&path, functions)),
         Target::Deno => Ok(render_deno(&path, functions)),
-        Target::NodeNapi | Target::Wasm | Target::All => {
+        Target::NodeNapi | Target::Wasm | Target::WasmBrowser | Target::All => {
             bail!("target {} has no loader renderer", target_name(target))
         }
     }
@@ -1125,7 +1158,7 @@ fn render_root_package_manifest() -> Result<String> {
             ".": {
                 "types": "./node-napi/index.d.ts",
                 "node": "./node-napi/index.js",
-                "default": "./wasm/index.js"
+                "default": "./wasm-browser/index.js"
             },
             "./node-koffi": {
                 "types": "./node-koffi/index.d.ts",
@@ -1142,6 +1175,10 @@ fn render_root_package_manifest() -> Result<String> {
             "./wasm": {
                 "types": "./wasm/index.d.ts",
                 "default": "./wasm/index.js"
+            },
+            "./wasm-browser": {
+                "types": "./wasm-browser/index.d.ts",
+                "default": "./wasm-browser/index.js"
             }
         },
         "dependencies": { "koffi": ">=2 <3" }
@@ -1347,7 +1384,8 @@ mod tests {
                 Target::Bun,
                 Target::Deno,
                 Target::NodeNapi,
-                Target::Wasm
+                Target::Wasm,
+                Target::WasmBrowser
             ]
         );
     }
@@ -1356,6 +1394,19 @@ mod tests {
     fn individual_compiled_targets_are_selected() {
         assert_eq!(selected_targets(Target::NodeNapi), [Target::NodeNapi]);
         assert_eq!(selected_targets(Target::Wasm), [Target::Wasm]);
+        assert_eq!(selected_targets(Target::WasmBrowser), [Target::WasmBrowser]);
+    }
+
+    #[test]
+    fn browser_wasm_loader_initializes_once_and_reexports_bindings() {
+        let loader = render_browser_wasm_loader();
+        assert!(loader.contains("ready ??= init({ module_or_path: input })"));
+        assert!(loader.contains("new URL(\"./bindings_bg.wasm\", import.meta.url)"));
+        assert!(loader.contains("export * from \"./bindings.js\""));
+        assert!(
+            render_browser_wasm_declarations()
+                .contains("Promise<import(\"./bindings.js\").InitOutput>")
+        );
     }
 
     #[test]

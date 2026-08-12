@@ -8,7 +8,20 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-eqts = { path = "../../eq-ts" }
+eqts = { path = "../../eq-ts", default-features = false }
+napi = { version = "=3.12.1", default-features = false, features = ["napi4"], optional = true }
+napi-derive = { version = "=3.6.3", optional = true }
+wasm-bindgen = { version = "=0.2.121", optional = true }
+
+[build-dependencies]
+napi-build = { version = "=2.4.1", optional = true }
+
+[features]
+default = ["node-napi"]
+node-napi = ["eqts/node-napi", "dep:napi", "dep:napi-derive", "dep:napi-build"]
+node-koffi = ["eqts/node-koffi"]
+bun = ["eqts/bun"]
+deno = ["eqts/deno"]
+wasm = ["eqts/wasm", "dep:wasm-bindgen"]
 
 [workspace]
-

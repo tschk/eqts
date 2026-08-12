@@ -1,0 +1,24 @@
+{
+  "name": "@tschk/eqts-node-napi-proof",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "napi build --platform --release --output-dir dist --js index.js --dts index.d.ts --esm",
+    "test": "bun run build && bun test parity.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "napi": {
+    "binaryName": "eqts_node_napi_proof",
+    "targets": [
+      "aarch64-apple-darwin"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.8.5",
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
+  }
+}

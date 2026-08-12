@@ -1,0 +1,22 @@
+{
+  "name": "@tschk/eqts-example-add",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:napi": "napi build --platform --release --output-dir dist/node-napi --js index.js --dts index.d.ts --esm",
+    "build:wasm": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm && wasm-bindgen target/wasm32-unknown-unknown/release/eqts_example_add.wasm --out-dir dist/wasm --out-name index --target nodejs",
+    "test:napi": "bun run build:napi && bun -e 'import { add } from \"./dist/node-napi/index.js\"; if (add(20, 22) !== 42) throw new Error(\"wrong result\")'",
+    "test:wasm": "bun run build:wasm && bun -e 'const { add } = require(\"./dist/wasm/index.js\"); if (add(20, 22) !== 42) throw new Error(\"wrong result\")'"
+  },
+  "napi": {
+    "binaryName": "eqts_example_add",
+    "targets": [
+      "aarch64-apple-darwin"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.8.5",
+    "typescript": "7.0.2"
+  }
+}

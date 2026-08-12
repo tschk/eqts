@@ -15,7 +15,7 @@ one Rust surface
 
 ## Status
 
-The first implementation slice is complete for numeric scalar metadata and shared-library adapter generation. Bun and Deno execute the generated `add` example on macOS arm64. Koffi generation is covered by Rust tests but has not yet been run against the Koffi package. Node-API, Wasm, Cargo feature gates, owned values, packaging, and the cross-platform matrix remain roadmap work.
+The fixed-width scalar slice is complete. One annotated function builds and executes through Node-API, Node with Koffi, Bun FFI, Deno FFI, and Node-compatible Wasm on macOS arm64. Metadata is deterministic and versioned; the native ABI catches panics and returns status codes. Owned values, browser Wasm initialization, consolidated publishing, and the cross-platform matrix remain roadmap work.
 
 ## Public surface
 

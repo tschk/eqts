@@ -2,7 +2,7 @@
 
 One Rust API, imported from TypeScript through a selected native runtime.
 
-Current implementation generates scalar adapters for Node with Koffi, Bun FFI, and Deno FFI. The example executes successfully in Bun and Deno on macOS arm64; Koffi execution and the wider platform matrix remain unverified.
+Current implementation generates fixed-width scalar adapters for Node-API, Node with Koffi, Bun FFI, Deno FFI, and Wasm. All five example adapters execute successfully on macOS arm64.
 
 ```rust
 eqts::setup!();
@@ -15,7 +15,9 @@ pub fn add(a: u32, b: u32) -> u32 {
 
 ```bash
 cargo install --path cargo-eqts
-cargo eqts build --target bun
+cargo eqts build --target all --release
 ```
+
+Consumer bridge crates expose the requested Cargo features: `node-napi`, `node-koffi`, `bun`, `deno`, and `wasm`. Node-API is the default. Native FFI targets share a panic-safe status-and-output-pointer ABI; Node-API uses napi-rs and Wasm uses wasm-bindgen.
 
 See [PLAN.md](PLAN.md) for the complete transport roadmap and acceptance criteria.

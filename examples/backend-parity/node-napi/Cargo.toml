@@ -1,0 +1,17 @@
+[package]
+name = "eqts-node-napi-proof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "=3.12.1", default-features = false, features = ["napi4"] }
+napi-derive = "=3.6.3"
+
+[build-dependencies]
+napi-build = "=2.4.1"
+
+[workspace]

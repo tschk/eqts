@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 eqts = { path = "../../eq-ts", default-features = false }

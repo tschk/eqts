@@ -15,7 +15,7 @@ one Rust surface
 
 ## Status
 
-The fixed-width scalar slice is complete. One annotated function builds and executes through Node-API, Node with Koffi, Bun FFI, Deno FFI, and Node-compatible Wasm on macOS arm64. Metadata is deterministic and versioned; the native ABI catches panics and returns status codes. Owned values, browser Wasm initialization, consolidated publishing, and the cross-platform matrix remain roadmap work.
+The first public type surface is complete: fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums. Shared annotated functions execute through Node-API, Node with Koffi, Bun FFI, Deno FFI, and Node-compatible Wasm on macOS arm64. Metadata is deterministic and versioned; the native ABI catches panics, returns status codes, and explicitly frees owned output buffers. Browser Wasm initialization, registry publishing, and the cross-platform matrix remain release work.
 
 ## Public surface
 

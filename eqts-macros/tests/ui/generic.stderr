@@ -1,0 +1,5 @@
+error: eqts exports cannot be generic
+ --> tests/ui/generic.rs:4:16
+  |
+4 | pub fn identity<T>(value: T) -> T {
+  |                ^^^

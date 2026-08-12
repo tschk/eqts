@@ -6,7 +6,7 @@ resolver = "2"
 edition = "2024"
 license = "ISC"
 repository = "https://github.com/tschk/eqts"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.lints.rust]
 future-incompatible = "warn"

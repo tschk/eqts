@@ -1,0 +1,5 @@
+error: eqts exports do not support async functions
+ --> tests/ui/async.rs:4:5
+  |
+4 | pub async fn value() -> u32 {
+  |     ^^^^^

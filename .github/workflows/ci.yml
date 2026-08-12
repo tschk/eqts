@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo doc --workspace --all-features --no-deps --locked
+
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - working-directory: examples/add
+        run: bun install --frozen-lockfile
+      - run: cargo build --manifest-path examples/add/Cargo.toml --release --locked --target ${{ matrix.target }} --no-default-features --features node-koffi,bun,deno
+      - run: cargo install --path cargo-eqts --locked --debug
+      - working-directory: examples/add
+        run: cargo eqts build --target node-koffi --release
+      - working-directory: examples/add
+        run: cargo eqts build --target bun --release
+      - working-directory: examples/add
+        run: cargo eqts build --target deno --release
+      - working-directory: examples/add
+        run: bun run typecheck
+
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - run: cargo build --manifest-path examples/add/Cargo.toml --release --locked --target x86_64-unknown-linux-musl --no-default-features --features node-koffi,bun,deno
+
+  parity-and-package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - working-directory: examples/add
+        run: bun install --frozen-lockfile
+      - run: cargo install --path cargo-eqts --locked --debug
+      - run: cargo install wasm-bindgen-cli --version 0.2.121 --locked
+      - working-directory: examples/add
+        run: cargo eqts build --target all --release
+      - working-directory: examples/add
+        run: bun install --no-save koffi@2
+      - working-directory: examples/add
+        run: bun -e 'const m=await import("./dist/bun/index.js"); if(m.add(20,22)!==42) throw new Error("Bun FFI parity failed");'
+      - working-directory: examples/add
+        run: bun -e 'const m=await import("./dist/node-koffi/index.js"); if(m.add(20,22)!==42) throw new Error("Koffi parity failed");'
+      - working-directory: examples/add
+        run: deno eval 'const m=await import("./dist/deno/index.js"); if(m.add(20,22)!==42) throw new Error("Deno FFI parity failed");'
+      - working-directory: examples/add
+        run: bun -e 'const m=await import("./dist/wasm-browser/index.js"); await m.initialize(); if(m.add(20,22)!==42) throw new Error("browser Wasm parity failed");'
+      - working-directory: examples/add
+        run: bun test parity.test.ts
+      - working-directory: examples/add
+        run: bun run typecheck
+      - working-directory: examples/add
+        run: bun -e 'const fs=require("node:fs"); for(const target of ["node-napi","node-koffi","bun","deno","wasm","wasm-browser"]) if(!fs.existsSync("dist/"+target)) throw new Error("missing "+target); for(const file of ["dist/package.json","dist/node-napi/index.js","dist/node-napi/index.d.ts","dist/node-koffi/index.js","dist/node-koffi/index.d.ts","dist/bun/index.js","dist/bun/index.d.ts","dist/deno/index.js","dist/deno/index.d.ts","dist/wasm/index.js","dist/wasm/index.d.ts","dist/wasm/index_bg.wasm","dist/wasm-browser/index.js","dist/wasm-browser/index.d.ts","dist/wasm-browser/bindings_bg.wasm"]) if(!fs.existsSync(file)) throw new Error("missing "+file);'
+      - working-directory: examples/add
+        run: bun -e 'const p=require("./dist/package.json"); for(const key of [".","./node-koffi","./bun","./deno","./wasm","./wasm-browser"]) if(!p.exports[key]) throw new Error("missing export "+key);'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: five-target-macos-arm64
+          path: examples/add/dist
+          if-no-files-found: error

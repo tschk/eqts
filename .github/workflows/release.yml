@@ -76,8 +76,27 @@ jobs:
             examples/add/dist/wasm-browser
           if-no-files-found: error
 
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - run: cargo build --manifest-path examples/add/Cargo.toml --release --locked --target x86_64-unknown-linux-musl --no-default-features --features node-koffi,bun,deno
+      - run: musl-gcc -shared -Wl,--whole-archive examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.a -Wl,--no-whole-archive -o examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
+      - run: nm -g examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so | grep ' T eqts_metadata_v1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eqts-x86_64-unknown-linux-musl
+          path: examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
+          if-no-files-found: error
+
   release-bundle:
-    needs: [prebuild, wasm]
+    needs: [prebuild, wasm, musl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

@@ -70,6 +70,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - run: cargo build --manifest-path examples/add/Cargo.toml --release --locked --target x86_64-unknown-linux-musl --no-default-features --features node-koffi,bun,deno
+      - run: musl-gcc -shared -Wl,--whole-archive examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.a -Wl,--no-whole-archive -o examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
+      - run: nm -g examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so | grep ' T eqts_metadata_v1'
 
   parity-and-package:
     runs-on: macos-14

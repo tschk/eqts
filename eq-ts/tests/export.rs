@@ -32,7 +32,7 @@ fn numeric_output_uses_status_and_out_pointer() {
 fn metadata_is_versioned_and_sorted() {
     let metadata: serde_json::Value =
         serde_json::from_slice(eqts::metadata_json()).expect("metadata must be valid JSON");
-    assert_eq!(metadata["schema_version"], 2);
+    assert_eq!(metadata["schema_version"], 3);
     assert_eq!(metadata["functions"][0]["name"], "add");
     assert_eq!(metadata["functions"][1]["name"], "invert");
 }

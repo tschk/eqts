@@ -7,5 +7,10 @@
     "target": "es2022",
     "types": ["bun"]
   },
-  "include": ["parity.test.ts", "typecheck.ts", "dist/**/*.d.ts"]
+  "include": [
+    "parity.test.ts",
+    "reactive.test.ts",
+    "typecheck.ts",
+    "dist/**/*.d.ts"
+  ]
 }

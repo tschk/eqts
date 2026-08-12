@@ -1,8 +1,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Data, DeriveInput, Fields, FnArg, GenericArgument, ItemFn, Pat, PathArguments, ReturnType,
-    Type, parse_macro_input,
+    Data, DeriveInput, Fields, FnArg, GenericArgument, ImplItem, ItemFn, ItemImpl, Pat,
+    PathArguments, ReturnType, Type, parse_macro_input,
 };
 
 #[proc_macro_attribute]
@@ -33,6 +33,237 @@ pub fn unit_enum(input: TokenStream) -> TokenStream {
     expand_enum(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+macro_rules! reactive_attribute {
+    ($name:ident, $kind:ident) => {
+        #[proc_macro_attribute]
+        pub fn $name(args: TokenStream, input: TokenStream) -> TokenStream {
+            let value = parse_macro_input!(args as Type);
+            let function = parse_macro_input!(input as ItemFn);
+            expand_reactive(&function, &value, &quote!(::eqts::ExportKind::$kind))
+                .unwrap_or_else(syn::Error::into_compile_error)
+                .into()
+        }
+    };
+}
+
+reactive_attribute!(object, Object);
+reactive_attribute!(trait_export, Trait);
+reactive_attribute!(async_export, Async);
+reactive_attribute!(callback, Callback);
+reactive_attribute!(stream, Stream);
+reactive_attribute!(iterator, Iterator);
+
+#[proc_macro_attribute]
+pub fn methods(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(input as ItemImpl);
+    expand_methods(&item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+#[proc_macro_attribute]
+pub fn method(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
+}
+
+fn expand_methods(item: &ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    if item.trait_.is_some() {
+        return Err(syn::Error::new_spanned(
+            item,
+            "methods requires an inherent impl",
+        ));
+    }
+    let self_ty = &item.self_ty;
+    let mut descriptors = Vec::new();
+    let mut arms = Vec::new();
+    let mut async_arms = Vec::new();
+    for member in &item.items {
+        let ImplItem::Fn(method) = member else {
+            continue;
+        };
+        if !matches!(method.vis, syn::Visibility::Public(_)) {
+            continue;
+        }
+        let asynchronous = method.sig.asyncness.is_some();
+        let Some(FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            return Err(syn::Error::new_spanned(
+                &method.sig,
+                "method requires a receiver",
+            ));
+        };
+        let name = &method.sig.ident;
+        let mutable = receiver.mutability.is_some();
+        if asynchronous && mutable {
+            return Err(syn::Error::new_spanned(
+                receiver,
+                "async methods cannot use &mut self",
+            ));
+        }
+        let mut parameters = Vec::new();
+        let mut reads = Vec::new();
+        let mut calls = Vec::new();
+        for (index, arg) in method.sig.inputs.iter().skip(1).enumerate() {
+            let FnArg::Typed(arg) = arg else {
+                unreachable!()
+            };
+            let ident = plain_ident(arg)?;
+            let ty = &arg.ty;
+            let schema = type_kind(ty)?.schema();
+            let index = syn::Index::from(index);
+            parameters.push(quote!(::eqts::Parameter{name:stringify!(#ident),ty:#schema}));
+            reads.push(quote!(let #ident=<#ty as ::eqts::EqtsValue>::from_json(arguments[#index].take())?;));
+            calls.push(ident);
+        }
+        let count = parameters.len();
+        let (result_ty, result) = match &method.sig.output {
+            ReturnType::Default => (
+                quote!(()),
+                quote!(::eqts::Type::Scalar{scalar:::eqts::Scalar::Void}),
+            ),
+            ReturnType::Type(_, ty) => (quote!(#ty), type_kind(ty)?.schema()),
+        };
+        descriptors.push(quote!(::eqts::Method{name:stringify!(#name),parameters:vec![#(#parameters),*],result:#result,mutable:#mutable,asynchronous:#asynchronous}));
+        if asynchronous {
+            async_arms.push(quote!(stringify!(#name)=>{if arguments.len()!=#count{return Err(format!("expected {} arguments, got {}",#count,arguments.len()));}#(#reads)*let snapshot=self.clone();Ok(::eqts::register_future(async move{snapshot.#name(#(#calls),*).await}))}));
+        } else {
+            arms.push(quote!(stringify!(#name)=>{if arguments.len()!=#count{return Err(format!("expected {} arguments, got {}",#count,arguments.len()));}#(#reads)*let value:#result_ty=self.#name(#(#calls),*);<#result_ty as ::eqts::EqtsValue>::into_json(value)}));
+        }
+    }
+    let cleaned = item.items.iter().map(|member| {
+        let mut member = member.clone();
+        if let ImplItem::Fn(method) = &mut member {
+            method.attrs.retain(|attr| !attr.path().is_ident("method"));
+        }
+        member
+    });
+    Ok(
+        quote!(impl #self_ty{#(#cleaned)*}impl ::eqts::EqtsMethods for #self_ty{fn invoke(&mut self,method:&str,mut arguments:Vec<::eqts::__private::Value>)->Result<::eqts::__private::Value,String>{match method{#(#arms,)*_=>Err(format!("unknown method: {method}"))}}fn invoke_async(&mut self,method:&str,mut arguments:Vec<::eqts::__private::Value>)->Result<u64,String>{match method{#(#async_arms,)*_=>Err(format!("unknown async method: {method}"))}}}::eqts::inventory::submit!{::eqts::MethodRegistration{describe:||::eqts::MethodSet{rust_type:stringify!(#self_ty),methods:vec![#(#descriptors),*]}}}),
+    )
+}
+
+#[expect(clippy::too_many_lines)]
+fn expand_reactive(
+    function: &ItemFn,
+    value: &Type,
+    kind: &proc_macro2::TokenStream,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let is_async = kind.to_string().ends_with("Async");
+    let is_callback = kind.to_string().ends_with("Callback");
+    if is_async {
+        if function.sig.asyncness.is_none() {
+            return Err(syn::Error::new_spanned(
+                &function.sig,
+                "async_export requires an async function",
+            ));
+        }
+        if !matches!(function.vis, syn::Visibility::Public(_))
+            || !function.sig.generics.params.is_empty()
+        {
+            return Err(syn::Error::new_spanned(
+                &function.sig,
+                "reactive exports must be public and non-generic",
+            ));
+        }
+    } else {
+        validate_function(function)?;
+    }
+    let all_arguments = function
+        .sig
+        .inputs
+        .iter()
+        .map(|argument| match argument {
+            FnArg::Typed(argument) => argument,
+            FnArg::Receiver(_) => unreachable!("validated"),
+        })
+        .collect::<Vec<_>>();
+    let (callback_name, arguments) = if is_callback {
+        let callback = all_arguments.first().ok_or_else(|| {
+            syn::Error::new_spanned(
+                &function.sig,
+                "callback export requires Callback<T> as first parameter",
+            )
+        })?;
+        (Some(plain_ident(callback)?), all_arguments[1..].to_vec())
+    } else {
+        (None, all_arguments)
+    };
+    let mut parameters = Vec::new();
+    let mut conversions = Vec::new();
+    let mut calls = Vec::new();
+    let mut napi_inputs = Vec::new();
+    let mut napi_values = Vec::new();
+    let mut wasm_inputs = Vec::new();
+    let mut wasm_values = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        let ident = plain_ident(argument)?;
+        let ty = &argument.ty;
+        let schema = type_kind(ty)?.schema();
+        let index = syn::Index::from(index);
+        let transport = format_ident!("__eqts_{ident}");
+        parameters.push(quote!(::eqts::Parameter { name: stringify!(#ident), ty: #schema }));
+        conversions.push(
+            quote!(let #ident = <#ty as ::eqts::EqtsValue>::from_json(values[#index].take())?;),
+        );
+        calls.push(ident);
+        napi_inputs.push(quote!(#transport: ::eqts::__private::Value));
+        napi_values.push(quote!(#transport));
+        wasm_inputs.push(quote!(#transport: ::eqts::wasm_bindgen::JsValue));
+        wasm_values.push(quote!(::eqts::serde_wasm_bindgen::from_value(#transport).map_err(|error| error.to_string())?));
+    }
+    let count = arguments.len();
+    let name = &function.sig.ident;
+    let wrapper = format_ident!("eqts_{name}");
+    let napi = format_ident!("__eqts_napi_{name}");
+    let wasm = format_ident!("__eqts_wasm_{name}");
+    let js_name = syn::LitStr::new(&camel_case(&name.to_string()), name.span());
+    let construct = format_ident!("__eqts_construct_{name}");
+    let is_object = kind.to_string().ends_with("Object") || kind.to_string().ends_with("Trait");
+    let register = if is_async {
+        quote!(::eqts::register_future(#name(#(#calls),*)))
+    } else if let Some(callback) = callback_name {
+        quote!(::eqts::register_callback::<#value>(|#callback| Box::new(#name(#callback, #(#calls),*))))
+    } else if is_object {
+        quote!(::eqts::register_object(#name(#(#calls),*)))
+    } else {
+        quote!(::eqts::register_reactive(#name(#(#calls),*)))
+    };
+    let kind_value = match kind.to_string().as_str() {
+        kind_name if kind_name.ends_with("Stream") || kind_name.ends_with("Iterator") => {
+            quote!(#kind { item: <#value as ::eqts::EqtsValue>::schema() })
+        }
+        kind_name if kind_name.ends_with("Callback") => {
+            let callback = callback_name.expect("validated callback");
+            quote!(#kind { value: <#value as ::eqts::EqtsValue>::schema(), callback_parameter: stringify!(#callback) })
+        }
+        _ => quote!(#kind { value: <#value as ::eqts::EqtsValue>::schema() }),
+    };
+    Ok(quote! {
+        #function
+        fn #construct(mut values: Vec<::eqts::__private::Value>) -> Result<u64, String> {
+            if values.len() != #count { return Err(format!("expected {} arguments, got {}", #count, values.len())); }
+            #(#conversions)*
+            Ok(#register)
+        }
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #wrapper(input: *const u8, len: usize, output: *mut u64) -> i32 {
+            if output.is_null() || (input.is_null() && len != 0) { return ::eqts::ABI_NULL_OUTPUT; }
+            let input = if len == 0 { &b"[]"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
+            let values = match ::eqts::__private::from_slice(input) { Ok(values) => values, Err(_) => return ::eqts::ABI_INVALID_INPUT };
+            match #construct(values) { Ok(handle) => unsafe { ::eqts::__private::write_output(output, handle) }, Err(_) => ::eqts::ABI_INVALID_INPUT }
+        }
+        #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
+        #[::eqts::napi_derive::napi(js_name = #js_name)]
+        fn #napi(#(#napi_inputs),*) -> ::eqts::napi::Result<::eqts::napi::bindgen_prelude::BigInt> { #construct(vec![#(#napi_values),*]).map(Into::into).map_err(::eqts::napi::Error::from_reason) }
+        #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
+        #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
+        pub fn #wasm(#(#wasm_inputs),*) -> Result<u64, ::eqts::wasm_bindgen::JsValue> { let values = (|| -> Result<_, String> { Ok(vec![#(#wasm_values),*]) })().map_err(|error| ::eqts::js_sys::Error::new(&error))?; #construct(values).map_err(|error| ::eqts::js_sys::Error::new(&error).into()) }
+        ::eqts::inventory::submit! { ::eqts::FunctionRegistration { describe: || ::eqts::Function {
+            module: module_path!(), name: stringify!(#name), symbol: stringify!(#wrapper), abi: ::eqts::Abi::Json,
+            parameters: vec![#(#parameters),*], result: ::eqts::Type::Scalar { scalar: ::eqts::Scalar::U64 }, kind: #kind_value
+        } } }
+    })
 }
 
 fn error(span: proc_macro2::Span, message: &str) -> TokenStream {
@@ -315,7 +546,7 @@ fn registration(
     result: &proc_macro2::TokenStream,
     generated: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    quote! { #function #generated ::eqts::inventory::submit! { ::eqts::FunctionRegistration { describe: || ::eqts::Function { module: module_path!(), name: stringify!(#name), symbol: stringify!(#wrapper), abi: #abi, parameters: vec![#(#parameters),*], result: #result } } } }
+    quote! { #function #generated ::eqts::inventory::submit! { ::eqts::FunctionRegistration { describe: || ::eqts::Function { module: module_path!(), name: stringify!(#name), symbol: stringify!(#wrapper), abi: #abi, parameters: vec![#(#parameters),*], result: #result, kind: ::eqts::ExportKind::Function } } } }
 }
 
 fn expand_record(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {

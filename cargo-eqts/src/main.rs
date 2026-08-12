@@ -47,16 +47,146 @@ enum Target {
     All,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 struct Function {
+    module: String,
+    name: String,
+    symbol: String,
+    abi: FunctionAbi,
+    kind: ExportKind,
+    parameters: Vec<Parameter>,
+    result: Type,
+    methods: Vec<Method>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FunctionWire {
     module: String,
     name: String,
     symbol: String,
     #[serde(default)]
     abi: FunctionAbi,
+    #[serde(default)]
+    kind: Option<KindWire>,
+    #[serde(default)]
+    value: Option<Type>,
+    #[serde(default)]
+    item: Option<Type>,
+    #[serde(default)]
+    callback_parameter: Option<String>,
     parameters: Vec<Parameter>,
     result: Type,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KindWire {
+    Name(String),
+    Descriptor(ExportKind),
+}
+
+impl<'de> Deserialize<'de> for Function {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = FunctionWire::deserialize(deserializer)?;
+        if let Some(KindWire::Descriptor(kind)) = wire.kind {
+            return Ok(Self {
+                module: wire.module,
+                name: wire.name,
+                symbol: wire.symbol,
+                abi: wire.abi,
+                kind,
+                parameters: wire.parameters,
+                result: wire.result,
+                methods: Vec::new(),
+            });
+        }
+        let kind_name = match wire.kind {
+            Some(KindWire::Name(kind)) => kind,
+            None => "function".to_string(),
+            Some(KindWire::Descriptor(_)) => unreachable!("descriptor returned above"),
+        };
+        let kind = match kind_name.as_str() {
+            "function" => ExportKind::Function,
+            "object" => ExportKind::Object {
+                value: wire
+                    .value
+                    .ok_or_else(|| serde::de::Error::missing_field("value"))?,
+            },
+            "trait" => ExportKind::Trait {
+                value: wire
+                    .value
+                    .ok_or_else(|| serde::de::Error::missing_field("value"))?,
+            },
+            "async" => ExportKind::Async {
+                value: wire
+                    .value
+                    .ok_or_else(|| serde::de::Error::missing_field("value"))?,
+            },
+            "callback" => ExportKind::Callback {
+                value: wire
+                    .value
+                    .ok_or_else(|| serde::de::Error::missing_field("value"))?,
+                callback_parameter: wire
+                    .callback_parameter
+                    .ok_or_else(|| serde::de::Error::missing_field("callback_parameter"))?,
+            },
+            "stream" => ExportKind::Stream {
+                item: wire
+                    .item
+                    .ok_or_else(|| serde::de::Error::missing_field("item"))?,
+            },
+            "iterator" => ExportKind::Iterator {
+                item: wire
+                    .item
+                    .ok_or_else(|| serde::de::Error::missing_field("item"))?,
+            },
+            kind => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown export kind {kind}"
+                )));
+            }
+        };
+        Ok(Self {
+            module: wire.module,
+            name: wire.name,
+            symbol: wire.symbol,
+            abi: wire.abi,
+            kind,
+            parameters: wire.parameters,
+            result: wire.result,
+            methods: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum ExportKind {
+    #[default]
+    Function,
+    Object {
+        value: Type,
+    },
+    Trait {
+        value: Type,
+    },
+    Async {
+        value: Type,
+    },
+    Callback {
+        value: Type,
+        callback_parameter: String,
+    },
+    Stream {
+        item: Type,
+    },
+    Iterator {
+        item: Type,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +196,25 @@ struct MetadataDocument {
     #[serde(default)]
     capabilities: std::collections::BTreeMap<String, bool>,
     functions: Vec<Function>,
+    #[serde(default)]
+    method_sets: Vec<MethodSet>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MethodSet {
+    rust_type: String,
+    methods: Vec<Method>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Method {
+    name: String,
+    parameters: Vec<Parameter>,
+    result: Type,
+    mutable: bool,
+    asynchronous: bool,
 }
 
 #[repr(C)]
@@ -394,19 +543,256 @@ fn render_bridge_loader(runtime: BridgeRuntime, functions: &[Function]) -> Strin
         BridgeRuntime::WasmNode => {
             "import bindings from \"./bindings.cjs\";\n\n".to_string()
         }
-        BridgeRuntime::WasmBrowser => "import init, * as bindings from \"./bindings.js\";\n\nlet ready;\n\nexport function initialize(input = new URL(\"./bindings_bg.wasm\", import.meta.url)) {\n  return ready ??= init({ module_or_path: input });\n}\n\n".to_string(),
+        BridgeRuntime::WasmBrowser => "import init, * as bindings from \"./bindings.js\";\n\nlet ready;\n\nexport function initialize(input = new URL(\"./bindings_bg.wasm\", import.meta.url)) {\n  if (!ready) ready = Promise.resolve().then(() => init({ module_or_path: input }));\n  return ready;\n}\n\n".to_string(),
     };
     output.push_str("function __eqtsNormalize(value) {\n  if (value instanceof Map) return Object.fromEntries(Array.from(value, ([key, entry]) => [key, __eqtsNormalize(entry)]));\n  if (Array.isArray(value)) return value.map(__eqtsNormalize);\n  return value;\n}\n\n");
     if functions
         .iter()
-        .any(|function| matches!(function.result, Type::Owned(OwnedType::Result { .. })))
+        .any(|function| !matches!(function.kind, ExportKind::Function))
     {
+        output.push_str(reactive_runtime());
+    }
+    if functions.iter().any(|function| {
+        matches!(function.result, Type::Owned(OwnedType::Result { .. }))
+            || !matches!(function.kind, ExportKind::Function)
+    }) {
         output.push_str("export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\n");
     }
     for function in functions {
-        render_bridge_function(&mut output, function);
+        if matches!(function.kind, ExportKind::Function) {
+            render_bridge_function(&mut output, function);
+        } else {
+            render_reactive_function(&mut output, function);
+        }
     }
     output
+}
+
+fn reactive_runtime() -> &'static str {
+    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  try {\n    const iterator = __eqtsHandle(handle, decode);\n    const result = await iterator.next();\n    iterator.dispose();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
+}
+
+fn render_reactive_function(output: &mut String, function: &Function) {
+    let name = typescript_name(&function.name);
+    let mut parameters = function
+        .parameters
+        .iter()
+        .map(|parameter| typescript_name(&parameter.name))
+        .collect::<Vec<_>>();
+    let arguments = parameters.join(", ");
+    let value = match &function.kind {
+        ExportKind::Object { value }
+        | ExportKind::Trait { value }
+        | ExportKind::Async { value }
+        | ExportKind::Callback { value, .. } => value,
+        ExportKind::Stream { item } | ExportKind::Iterator { item } => item,
+        ExportKind::Function => unreachable!("reactive renderer received function"),
+    };
+    let decode = format!("(value) => {}", wire_decode("value", value));
+    if matches!(function.kind, ExportKind::Async { .. }) {
+        parameters.push("options = {}".to_string());
+    }
+    if let ExportKind::Callback {
+        callback_parameter, ..
+    } = &function.kind
+    {
+        parameters.push(typescript_name(callback_parameter));
+    }
+    let callback = if let ExportKind::Callback {
+        callback_parameter, ..
+    } = &function.kind
+    {
+        Some(typescript_name(callback_parameter))
+    } else {
+        None
+    };
+    writeln!(
+        output,
+        "export function {name}({}) {{",
+        parameters.join(", ")
+    )
+    .expect("writing to a string cannot fail");
+    writeln!(output, "  const handle = bindings.{name}({arguments});")
+        .expect("writing to a string cannot fail");
+    if matches!(
+        function.kind,
+        ExportKind::Object { .. } | ExportKind::Trait { .. }
+    ) {
+        output.push_str("  const resource = __eqtsHandle(handle, __eqtsNormalize);\n");
+        render_object_methods(output, function);
+        output.push_str("  return resource;\n");
+    } else if let Some(callback) = callback {
+        writeln!(
+            output,
+            "  return __eqtsCallback(handle, {callback}, {decode});"
+        )
+        .expect("writing to a string cannot fail");
+    } else if matches!(function.kind, ExportKind::Async { .. }) {
+        writeln!(
+            output,
+            "  return __eqtsAwait(handle, options.signal, {decode});"
+        )
+        .expect("writing to a string cannot fail");
+    } else {
+        writeln!(output, "  return __eqtsHandle(handle, {decode});")
+            .expect("writing to a string cannot fail");
+    }
+    output.push_str("}\n");
+}
+
+fn render_native_reactive_constructor(output: &mut String, function: &Function, runtime: Runtime) {
+    let name = typescript_name(&function.name);
+    let mut parameters = function
+        .parameters
+        .iter()
+        .map(|parameter| typescript_name(&parameter.name))
+        .collect::<Vec<_>>();
+    let arguments = function
+        .parameters
+        .iter()
+        .map(|parameter| wire_encode(&typescript_name(&parameter.name), &parameter.ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = match &function.kind {
+        ExportKind::Object { value }
+        | ExportKind::Trait { value }
+        | ExportKind::Async { value }
+        | ExportKind::Callback { value, .. } => value,
+        ExportKind::Stream { item } | ExportKind::Iterator { item } => item,
+        ExportKind::Function => unreachable!("reactive renderer received function"),
+    };
+    let decode = format!("(value) => {}", wire_decode("value", value));
+    if matches!(function.kind, ExportKind::Async { .. }) {
+        parameters.push("options = {}".to_string());
+    }
+    let callback = if let ExportKind::Callback {
+        callback_parameter, ..
+    } = &function.kind
+    {
+        parameters.push(typescript_name(callback_parameter));
+        Some(typescript_name(callback_parameter))
+    } else {
+        None
+    };
+    writeln!(
+        output,
+        "export function {name}({}) {{",
+        parameters.join(", ")
+    )
+    .expect("writing to a string cannot fail");
+    let storage = output_storage(runtime, Scalar::U64);
+    writeln!(
+        output,
+        "  const __eqtsInput = new TextEncoder().encode(JSON.stringify([{arguments}]));"
+    )
+    .expect("writing to a string cannot fail");
+    writeln!(output, "  const __eqtsHandleOutput = {storage};")
+        .expect("writing to a string cannot fail");
+    let output_arg = if matches!(runtime, Runtime::Bun) {
+        "ptr(__eqtsHandleOutput)"
+    } else {
+        "__eqtsHandleOutput"
+    };
+    let input_arg = if matches!(runtime, Runtime::Bun) {
+        "ptr(__eqtsInput)"
+    } else {
+        "__eqtsInput"
+    };
+    let input_len = if matches!(runtime, Runtime::Koffi) {
+        "__eqtsInput.byteLength"
+    } else {
+        "BigInt(__eqtsInput.byteLength)"
+    };
+    writeln!(
+        output,
+        "  const __eqtsStatus = {}({input_arg}, {input_len}, {output_arg});",
+        runtime_call(runtime, function)
+    )
+    .expect("writing to a string cannot fail");
+    writeln!(
+        output,
+        "  checkStatus(__eqtsStatus, \"{}\");",
+        function.name
+    )
+    .expect("writing to a string cannot fail");
+    output.push_str("  const handle = __eqtsHandleOutput[0];\n");
+    if matches!(
+        function.kind,
+        ExportKind::Object { .. } | ExportKind::Trait { .. }
+    ) {
+        output.push_str("  const resource = __eqtsHandle(handle, __eqtsNormalize);\n");
+        render_object_methods(output, function);
+        output.push_str("  return resource;\n");
+    } else if let Some(callback) = callback {
+        writeln!(
+            output,
+            "  return __eqtsCallback(handle, {callback}, {decode});"
+        )
+        .expect("writing to a string cannot fail");
+    } else if matches!(function.kind, ExportKind::Async { .. }) {
+        writeln!(
+            output,
+            "  return __eqtsAwait(handle, options.signal, {decode});"
+        )
+        .expect("writing to a string cannot fail");
+    } else {
+        writeln!(output, "  return __eqtsHandle(handle, {decode});")
+            .expect("writing to a string cannot fail");
+    }
+    output.push_str("}\n");
+}
+
+fn render_object_methods(output: &mut String, function: &Function) {
+    for method in &function.methods {
+        let name = typescript_name(&method.name);
+        let parameters = method
+            .parameters
+            .iter()
+            .map(|parameter| typescript_name(&parameter.name))
+            .collect::<Vec<_>>();
+        let arguments = method
+            .parameters
+            .iter()
+            .map(|parameter| wire_encode(&typescript_name(&parameter.name), &parameter.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut rendered_parameters = parameters.clone();
+        if method.asynchronous {
+            rendered_parameters.push("options = {}".to_string());
+        }
+        writeln!(
+            output,
+            "  resource.{name} = ({}) => {{",
+            rendered_parameters.join(", ")
+        )
+        .expect("writing string");
+        output.push_str("    if (resource.disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n");
+        let method_name = serde_json::to_string(&method.name).expect("method name JSON");
+        if method.asynchronous {
+            writeln!(output, "    const __eqtsAsyncHandle = bindings.eqtsHandleInvokeAsync(handle, {method_name}, [{arguments}]);").expect("writing string");
+            writeln!(
+                output,
+                "    return __eqtsAwait(__eqtsAsyncHandle, options.signal, (value) => {});",
+                wire_decode("value", &method.result)
+            )
+            .expect("writing string");
+        } else {
+            output.push_str("    let __eqtsResult;\n    try {\n");
+            writeln!(output, "      __eqtsResult = __eqtsNormalize(bindings.eqtsHandleInvoke(handle, {method_name}, [{arguments}]));").expect("writing string");
+            output.push_str("    } catch (__eqtsCaught) {\n      let __eqtsDetail = __eqtsCaught?.message ?? String(__eqtsCaught);\n      try { __eqtsDetail = JSON.parse(__eqtsDetail); } catch {}\n      throw new EqtsError(\"RUST_ERROR\", __eqtsDetail);\n    }\n");
+        }
+        if !method.asynchronous && matches!(method.result, Type::Scalar(Scalar::Void)) {
+            output.push_str("    return;\n");
+        } else if !method.asynchronous {
+            writeln!(
+                output,
+                "    return {};",
+                wire_decode("__eqtsResult", &method.result)
+            )
+            .expect("writing string");
+        }
+        output.push_str("  };\n");
+    }
 }
 
 fn render_bridge_function(output: &mut String, function: &Function) {
@@ -599,15 +985,56 @@ fn load_metadata(library_path: &Path) -> Result<Vec<Function>> {
 }
 
 fn parse_metadata(bytes: &[u8]) -> Result<Vec<Function>> {
-    let document: MetadataDocument =
+    let mut document: MetadataDocument =
         serde_json::from_slice(bytes).context("eqts metadata is invalid JSON")?;
-    if !matches!(document.schema_version, 1 | 2) {
+    if !matches!(document.schema_version, 1..=3) {
         bail!(
-            "unsupported eqts metadata schema version {}; expected 1 or 2",
+            "unsupported eqts metadata schema version {}; expected 1, 2, or 3",
             document.schema_version
         );
     }
-    validate_capabilities(document.capabilities)?;
+    if document.schema_version == 3
+        && document
+            .functions
+            .iter()
+            .all(|function| matches!(function.kind, ExportKind::Function))
+        && document
+            .capabilities
+            .iter()
+            .any(|(name, enabled)| *enabled && name != "owned_values")
+    {
+        bail!(
+            "eqts metadata schema version 3 declares reactive capabilities without per-export descriptors; cannot distinguish ordinary u64 values from reactive handles or generate parity-safe loaders"
+        );
+    }
+    if document.schema_version < 3 {
+        validate_capabilities(document.capabilities)?;
+    }
+    for function in &mut document.functions {
+        let (ExportKind::Object { value } | ExportKind::Trait { value }) = &function.kind else {
+            continue;
+        };
+        let Type::Owned(OwnedType::Record {
+            name: type_name, ..
+        }) = value
+        else {
+            bail!(
+                "object or trait export {} must describe a named record type",
+                function.name
+            );
+        };
+        let method_set = document
+            .method_sets
+            .iter()
+            .find(|set| set.rust_type.rsplit("::").next() == Some(type_name.as_str()))
+            .with_context(|| {
+                format!(
+                    "object or trait export {} has no method set for {type_name}",
+                    function.name
+                )
+            })?;
+        function.methods.clone_from(&method_set.methods);
+    }
     Ok(document.functions)
 }
 
@@ -671,6 +1098,50 @@ fn normalized_metadata(mut functions: Vec<Function>) -> Result<Vec<Function>> {
             }
         }
         validate_type(&function.result)?;
+        match &function.kind {
+            ExportKind::Function => {}
+            ExportKind::Object { value } | ExportKind::Trait { value } => {
+                validate_reactive_handle(function)?;
+                validate_type(value)?;
+                if function.methods.is_empty() {
+                    bail!("object or trait export {} has no methods", function.name);
+                }
+                for method in &function.methods {
+                    validate_identifier(&method.name)?;
+                    for parameter in &method.parameters {
+                        validate_identifier(&parameter.name)?;
+                        validate_type(&parameter.ty)?;
+                    }
+                    validate_type(&method.result)?;
+                    let _ = method.mutable;
+                }
+            }
+            ExportKind::Async { value } => {
+                validate_reactive_handle(function)?;
+                validate_type(value)?;
+            }
+            ExportKind::Callback {
+                value,
+                callback_parameter,
+            } => {
+                validate_reactive_handle(function)?;
+                validate_type(value)?;
+                validate_identifier(callback_parameter)?;
+                if function
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.name == *callback_parameter)
+                {
+                    bail!(
+                        "callback parameter {callback_parameter} must be virtual and omitted from the raw factory ABI"
+                    );
+                }
+            }
+            ExportKind::Stream { item } | ExportKind::Iterator { item } => {
+                validate_reactive_handle(function)?;
+                validate_type(item)?;
+            }
+        }
         if function.abi == FunctionAbi::Scalar
             && (function
                 .parameters
@@ -693,6 +1164,16 @@ fn normalized_metadata(mut functions: Vec<Function>) -> Result<Vec<Function>> {
         }
     }
     Ok(functions)
+}
+
+fn validate_reactive_handle(function: &Function) -> Result<()> {
+    if function.abi != FunctionAbi::Json || !matches!(function.result, Type::Scalar(Scalar::U64)) {
+        bail!(
+            "reactive export {} must use JSON constructor ABI and return a u64 handle",
+            function.name
+        );
+    }
+    Ok(())
 }
 
 fn validate_type(ty: &Type) -> Result<()> {
@@ -814,6 +1295,7 @@ fn typescript_name(name: &str) -> String {
     output
 }
 
+#[expect(clippy::too_many_lines)]
 fn render_declarations(functions: &[Function]) -> String {
     let mut output = String::new();
     let mut definitions = std::collections::BTreeMap::new();
@@ -822,16 +1304,31 @@ fn render_declarations(functions: &[Function]) -> String {
             collect_definitions(&parameter.ty, &mut definitions);
         }
         collect_definitions(&function.result, &mut definitions);
+        match &function.kind {
+            ExportKind::Object { value }
+            | ExportKind::Trait { value }
+            | ExportKind::Async { value }
+            | ExportKind::Callback { value, .. } => collect_definitions(value, &mut definitions),
+            ExportKind::Stream { item } | ExportKind::Iterator { item } => {
+                collect_definitions(item, &mut definitions);
+            }
+            ExportKind::Function => {}
+        }
     }
     for definition in definitions.values() {
         output.push_str(definition);
         output.push('\n');
     }
+    if functions.iter().any(|function| {
+        function.abi == FunctionAbi::Json || !matches!(function.kind, ExportKind::Function)
+    }) {
+        output.push_str("export declare class EqtsError extends Error {\n  constructor(code: string, value: unknown);\n  readonly code: string;\n  readonly value: unknown;\n}\n\n");
+    }
     if functions
         .iter()
-        .any(|function| function.abi == FunctionAbi::Json)
+        .any(|function| !matches!(function.kind, ExportKind::Function))
     {
-        output.push_str("export declare class EqtsError extends Error {\n  constructor(code: string, value: unknown);\n  readonly code: string;\n  readonly value: unknown;\n}\n\n");
+        output.push_str("export interface EqtsHandle<T> extends AsyncIterable<T>, AsyncIterator<T>, Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\nexport interface EqtsCallbackHandle extends Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\n");
     }
     for function in functions {
         let parameters = function
@@ -840,11 +1337,79 @@ fn render_declarations(functions: &[Function]) -> String {
             .map(|parameter| format!("{}: {}", parameter.name, ts_type(&parameter.ty)))
             .collect::<Vec<_>>()
             .join(", ");
+        let parameters = if let ExportKind::Callback {
+            value,
+            callback_parameter,
+        } = &function.kind
+        {
+            let callback = format!(
+                "{}: (value: {}) => void | Promise<void>",
+                typescript_name(callback_parameter),
+                ts_type(value)
+            );
+            if parameters.is_empty() {
+                callback
+            } else {
+                format!("{parameters}, {callback}")
+            }
+        } else {
+            parameters
+        };
+        let return_type = match &function.kind {
+            ExportKind::Function => ts_return_type(&function.result),
+            ExportKind::Async { value } => format!("Promise<{}>", ts_type(value)),
+            ExportKind::Object { value } | ExportKind::Trait { value } => {
+                let methods = function
+                    .methods
+                    .iter()
+                    .map(|method| {
+                        let mut parameters = method
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                format!(
+                                    "{}: {}",
+                                    typescript_name(&parameter.name),
+                                    ts_type(&parameter.ty)
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if method.asynchronous {
+                            parameters.push("options?: { signal?: AbortSignal }".to_string());
+                        }
+                        let result = if method.asynchronous {
+                            format!("Promise<{}>", ts_type(&method.result))
+                        } else {
+                            ts_return_type(&method.result)
+                        };
+                        format!(
+                            "{}({}): {result}",
+                            typescript_name(&method.name),
+                            parameters.join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("EqtsHandle<{}> & {{ {methods} }}", ts_type(value))
+            }
+            ExportKind::Callback { .. } => "EqtsCallbackHandle".to_string(),
+            ExportKind::Stream { item } | ExportKind::Iterator { item } => {
+                format!("EqtsHandle<{}>", ts_type(item))
+            }
+        };
+        let parameters = if matches!(function.kind, ExportKind::Async { .. }) {
+            if parameters.is_empty() {
+                "options?: { signal?: AbortSignal }".to_string()
+            } else {
+                format!("{parameters}, options?: {{ signal?: AbortSignal }}")
+            }
+        } else {
+            parameters
+        };
         writeln!(
             output,
-            "export declare function {}({parameters}): {};",
+            "export declare function {}({parameters}): {return_type};",
             typescript_name(&function.name),
-            ts_return_type(&function.result)
         )
         .expect("writing to a string cannot fail");
     }
@@ -908,9 +1473,13 @@ fn render_loader(
 }
 
 fn render_koffi(path: &str, functions: &[Function]) -> String {
+    let reactive = functions
+        .iter()
+        .any(|function| !matches!(function.kind, ExportKind::Function));
     let owned_buffer = if functions
         .iter()
         .any(|function| function.abi == FunctionAbi::Json)
+        || reactive
     {
         "const OwnedBuffer = koffi.struct({ ptr: \"void *\", len: \"size_t\", capacity: \"size_t\" });\nconst __eqtsBufferFree = library.func(\"eqts_buffer_free_v1\", \"void\", [\"void *\", \"size_t\", \"size_t\"]);\n"
     } else {
@@ -920,8 +1489,18 @@ fn render_koffi(path: &str, functions: &[Function]) -> String {
         "import koffi from \"koffi\";\nimport {{ fileURLToPath }} from \"node:url\";\n\nconst library = koffi.load(fileURLToPath(new URL(\"{path}\", import.meta.url)));\n{owned_buffer}\n{}\n",
         js_helpers()
     );
+    if reactive {
+        output.push_str("const __eqtsInvokeAsync = library.func(\"eqts_handle_invoke_async_v1\", \"int32_t\", [\"uint64_t\", \"uint8_t *\", \"size_t\", koffi.out(koffi.pointer(\"uint64_t\"))]);\n");
+        output.push_str("const __eqtsDispose = library.func(\"eqts_handle_dispose_v1\", \"int32_t\", [\"uint64_t\"]);\nconst __eqtsCancel = library.func(\"eqts_reactive_cancel_v1\", \"int32_t\", [\"uint64_t\"]);\nconst __eqtsPoll = library.func(\"eqts_reactive_poll_v1\", \"int32_t\", [\"uint64_t\", koffi.out(koffi.pointer(OwnedBuffer))]);\nconst __eqtsInvoke = library.func(\"eqts_handle_invoke_v1\", \"int32_t\", [\"uint64_t\", \"uint8_t *\", \"size_t\", koffi.out(koffi.pointer(OwnedBuffer))]);\nconst bindings = {\n  eqtsHandleDispose(handle) { __eqtsDispose(handle); },\n  eqtsHandleInvoke(handle, method, __eqtsArguments) { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = {}; const status = __eqtsInvoke(handle, input, input.byteLength, output); let text = \"\"; try { if (output.ptr) text = koffi.decode(output.ptr, \"char\", Number(output.len)); } finally { if (output.ptr) __eqtsBufferFree(output.ptr, output.len, output.capacity); } checkStatus(status, method, text); return JSON.parse(text); },\n  eqtsReactiveCancel(handle) { const status = __eqtsCancel(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = {}; const status = __eqtsPoll(handle, output); let value = null; try { if (output.ptr) value = JSON.parse(koffi.decode(output.ptr, \"char\", Number(output.len))); } finally { if (output.ptr) __eqtsBufferFree(output.ptr, output.len, output.capacity); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
+        output.push_str("bindings.eqtsHandleInvokeAsync = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = [null]; const status = __eqtsInvokeAsync(handle, input, input.byteLength, output); checkStatus(status, method); return output[0]; };\n\n");
+        output.push_str(reactive_runtime());
+    }
     for function in functions {
-        if function.abi == FunctionAbi::Json {
+        if !matches!(function.kind, ExportKind::Function) {
+            writeln!(output, "const __eqts_{} = library.func(\"{}\", \"int32_t\", [\"uint8_t *\", \"size_t\", koffi.out(koffi.pointer(\"uint64_t\"))]);", function.name, function.symbol).expect("writing to string cannot fail");
+            render_native_reactive_constructor(&mut output, function, Runtime::Koffi);
+            continue;
+        } else if function.abi == FunctionAbi::Json {
             writeln!(output, "const __eqts_{} = library.func(\"{}\", \"int32_t\", [\"uint8_t *\", \"size_t\", koffi.out(koffi.pointer(OwnedBuffer))]);", function.name, function.symbol).expect("writing to a string cannot fail");
             render_json_wrapper(&mut output, function, Runtime::Koffi);
             continue;
@@ -951,6 +1530,9 @@ fn render_koffi(path: &str, functions: &[Function]) -> String {
 }
 
 fn render_bun(path: &str, functions: &[Function]) -> String {
+    let reactive = functions
+        .iter()
+        .any(|function| !matches!(function.kind, ExportKind::Function));
     let mut output = "import { dlopen, FFIType, ptr, toArrayBuffer } from \"bun:ffi\";\nimport { fileURLToPath } from \"node:url\";\n\n".to_string();
     writeln!(
         output,
@@ -958,6 +1540,15 @@ fn render_bun(path: &str, functions: &[Function]) -> String {
     )
     .expect("writing to a string cannot fail");
     for function in functions {
+        if !matches!(function.kind, ExportKind::Function) {
+            writeln!(
+                output,
+                "  {}: {{ args: [FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 }},",
+                function.symbol
+            )
+            .expect("writing to string cannot fail");
+            continue;
+        }
         if function.abi == FunctionAbi::Json {
             writeln!(
                 output,
@@ -986,14 +1577,26 @@ fn render_bun(path: &str, functions: &[Function]) -> String {
     if functions
         .iter()
         .any(|function| function.abi == FunctionAbi::Json)
+        || reactive
     {
         output.push_str("  eqts_buffer_free_v1: { args: [FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.void },\n");
+    }
+    if reactive {
+        output.push_str("  eqts_handle_dispose_v1: { args: [FFIType.u64], returns: FFIType.i32 },\n  eqts_handle_invoke_v1: { args: [FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },\n  eqts_handle_invoke_async_v1: { args: [FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },\n  eqts_reactive_cancel_v1: { args: [FFIType.u64], returns: FFIType.i32 },\n  eqts_reactive_poll_v1: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },\n");
     }
     output.push_str("});\n\n");
     output.push_str(js_helpers());
     output.push('\n');
+    if reactive {
+        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, ptr(output)); let value = null; try { if (output[0] !== 0n) value = JSON.parse(new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice())); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
+        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); let text = \"\"; try { if (output[0] !== 0n) text = new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice()); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
+        output.push_str("bindings.eqtsHandleInvokeAsync = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(1); const status = symbols.eqts_handle_invoke_async_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); checkStatus(status, method); return output[0]; };\n\n");
+        output.push_str(reactive_runtime());
+    }
     for function in functions {
-        if function.abi == FunctionAbi::Json {
+        if !matches!(function.kind, ExportKind::Function) {
+            render_native_reactive_constructor(&mut output, function, Runtime::Bun);
+        } else if function.abi == FunctionAbi::Json {
             render_json_wrapper(&mut output, function, Runtime::Bun);
         } else {
             render_wrapper(&mut output, function, Runtime::Bun);
@@ -1003,9 +1606,21 @@ fn render_bun(path: &str, functions: &[Function]) -> String {
 }
 
 fn render_deno(path: &str, functions: &[Function]) -> String {
+    let reactive = functions
+        .iter()
+        .any(|function| !matches!(function.kind, ExportKind::Function));
     let mut output =
         format!("const {{ symbols }} = Deno.dlopen(new URL(\"{path}\", import.meta.url), {{\n");
     for function in functions {
+        if !matches!(function.kind, ExportKind::Function) {
+            writeln!(
+                output,
+                "  {}: {{ parameters: [\"buffer\", \"usize\", \"buffer\"], result: \"i32\" }},",
+                function.symbol
+            )
+            .expect("writing to string cannot fail");
+            continue;
+        }
         if function.abi == FunctionAbi::Json {
             writeln!(
                 output,
@@ -1034,14 +1649,26 @@ fn render_deno(path: &str, functions: &[Function]) -> String {
     if functions
         .iter()
         .any(|function| function.abi == FunctionAbi::Json)
+        || reactive
     {
         output.push_str("  eqts_buffer_free_v1: { parameters: [\"pointer\", \"usize\", \"usize\"], result: \"void\" },\n");
+    }
+    if reactive {
+        output.push_str("  eqts_handle_dispose_v1: { parameters: [\"u64\"], result: \"i32\" },\n  eqts_handle_invoke_v1: { parameters: [\"u64\", \"buffer\", \"usize\", \"buffer\"], result: \"i32\" },\n  eqts_handle_invoke_async_v1: { parameters: [\"u64\", \"buffer\", \"usize\", \"buffer\"], result: \"i32\" },\n  eqts_reactive_cancel_v1: { parameters: [\"u64\"], result: \"i32\" },\n  eqts_reactive_poll_v1: { parameters: [\"u64\", \"buffer\"], result: \"i32\" },\n");
     }
     output.push_str("});\n\n");
     output.push_str(js_helpers());
     output.push('\n');
+    if reactive {
+        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, output); const pointer = output[0] === 0n ? null : Deno.UnsafePointer.create(output[0]); let value = null; try { if (pointer) value = JSON.parse(new TextDecoder().decode(new Uint8Array(new Deno.UnsafePointerView(pointer).getArrayBuffer(Number(output[1]))).slice())); } finally { if (pointer) symbols.eqts_buffer_free_v1(pointer, output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
+        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, input, BigInt(input.byteLength), output); const pointer = output[0] === 0n ? null : Deno.UnsafePointer.create(output[0]); let text = \"\"; try { if (pointer) text = new TextDecoder().decode(new Uint8Array(new Deno.UnsafePointerView(pointer).getArrayBuffer(Number(output[1]))).slice()); } finally { if (pointer) symbols.eqts_buffer_free_v1(pointer, output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
+        output.push_str("bindings.eqtsHandleInvokeAsync = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(1); const status = symbols.eqts_handle_invoke_async_v1(handle, input, BigInt(input.byteLength), output); checkStatus(status, method); return output[0]; };\n\n");
+        output.push_str(reactive_runtime());
+    }
     for function in functions {
-        if function.abi == FunctionAbi::Json {
+        if !matches!(function.kind, ExportKind::Function) {
+            render_native_reactive_constructor(&mut output, function, Runtime::Deno);
+        } else if function.abi == FunctionAbi::Json {
             render_json_wrapper(&mut output, function, Runtime::Deno);
         } else {
             render_wrapper(&mut output, function, Runtime::Deno);
@@ -1058,7 +1685,7 @@ enum Runtime {
 }
 
 fn js_helpers() -> &'static str {
-    "export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\nfunction checkStatus(status, name, detail) {\n  if (status === 0) return;\n  const code = { 1: \"RUST_PANIC\", 2: \"NULL_OUTPUT\", 3: \"INVALID_INPUT\", 4: \"ENCODE_FAILURE\" }[status] ?? \"ABI_ERROR\";\n  throw new EqtsError(code, detail || `eqts call ${name} failed with ABI status ${status}`);\n}\n"
+    "export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\nfunction __eqtsNormalize(value) {\n  if (value instanceof Map) return Object.fromEntries(Array.from(value, ([key, entry]) => [key, __eqtsNormalize(entry)]));\n  if (Array.isArray(value)) return value.map(__eqtsNormalize);\n  return value;\n}\n\nfunction checkStatus(status, name, detail) {\n  if (status === 0) return;\n  const code = { 1: \"RUST_PANIC\", 2: \"NULL_OUTPUT\", 3: \"INVALID_INPUT\", 4: \"ENCODE_FAILURE\" }[status] ?? \"ABI_ERROR\";\n  throw new EqtsError(code, detail || `eqts call ${name} failed with ABI status ${status}`);\n}\n"
 }
 
 fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtime) {
@@ -1474,6 +2101,7 @@ mod tests {
             name: "add".to_string(),
             symbol: "eqts_add".to_string(),
             abi: FunctionAbi::Scalar,
+            kind: ExportKind::Function,
             parameters: vec![
                 Parameter {
                     name: "a".to_string(),
@@ -1485,6 +2113,7 @@ mod tests {
                 },
             ],
             result: Type::Scalar(Scalar::U32),
+            methods: Vec::new(),
         }
     }
 
@@ -1590,10 +2219,39 @@ mod tests {
     #[test]
     fn browser_wasm_loader_initializes_once() {
         let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[add_function()]);
-        assert!(loader.contains("ready ??= init({ module_or_path: input })"));
+        assert!(loader.contains(
+            "if (!ready) ready = Promise.resolve().then(() => init({ module_or_path: input }))"
+        ));
+        assert!(loader.contains("return ready"));
         assert!(loader.contains("new URL(\"./bindings_bg.wasm\", import.meta.url)"));
         assert!(loader.contains("export function add(a, b)"));
         assert!(!loader.contains("export * from \"./bindings.js\""));
+    }
+
+    #[test]
+    fn browser_wasm_initialize_is_concurrency_safe() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        fs::write(
+            temporary.path().join("bindings.js"),
+            "let calls = 0; export default async function init({ module_or_path }) { calls++; await module_or_path.text(); return calls; } export function add() {} export { calls };",
+        )
+        .expect("write bindings");
+        fs::write(
+            temporary.path().join("index.js"),
+            render_bridge_loader(BridgeRuntime::WasmBrowser, &[add_function()]),
+        )
+        .expect("write loader");
+        fs::write(
+            temporary.path().join("test.js"),
+            "import { initialize } from './index.js'; import { calls } from './bindings.js'; const response = new Response('wasm'); const [a,b] = await Promise.all([initialize(response), initialize(response)]); if (a !== b || calls !== 1) throw new Error(`init race: ${a} ${b} ${calls}`);",
+        )
+        .expect("write test");
+        let status = Command::new("bun")
+            .arg("test.js")
+            .current_dir(temporary.path())
+            .status()
+            .expect("Bun must be installed for generated JavaScript tests");
+        assert!(status.success());
     }
 
     #[test]
@@ -1640,9 +2298,171 @@ mod tests {
 
     #[test]
     fn unsupported_metadata_schema_is_rejected() {
-        let error = parse_metadata(br#"{"schema_version":3,"functions":[]}"#)
+        let error = parse_metadata(br#"{"schema_version":4,"functions":[]}"#)
             .expect_err("unknown schema must fail");
-        assert!(error.to_string().contains("schema version 3"));
+        assert!(error.to_string().contains("schema version 4"));
+    }
+
+    #[test]
+    fn reactive_schema_without_export_descriptors_is_rejected() {
+        let metadata = br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"fixture","name":"resource","symbol":"eqts_resource","abi":"scalar","parameters":[],"result":{"kind":"scalar","scalar":"u64"}}]}"#;
+        let error = parse_metadata(metadata).expect_err("ambiguous reactive handle must fail");
+        assert!(error.to_string().contains("without per-export descriptors"));
+        assert!(error.to_string().contains("ordinary u64 values"));
+    }
+
+    fn reactive_function(kind: ExportKind) -> Function {
+        Function {
+            module: "fixture".to_string(),
+            name: "events".to_string(),
+            symbol: "eqts_events".to_string(),
+            abi: FunctionAbi::Json,
+            kind,
+            parameters: Vec::new(),
+            result: Type::Scalar(Scalar::U64),
+            methods: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn v3_reactive_descriptors_generate_canonical_declarations() {
+        let functions = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"fixture","name":"events","symbol":"eqts_events","abi":"json","kind":"stream","parameters":[],"result":{"kind":"scalar","scalar":"u64"},"item":{"kind":"string"}}]}"#,
+        )
+        .expect("described reactive metadata should parse");
+        let declarations = render_declarations(&functions);
+        assert!(declarations.contains("interface EqtsHandle<T>"));
+        assert!(declarations.contains("events(): EqtsHandle<string>"));
+    }
+
+    #[test]
+    fn v3_nested_reactive_descriptor_shape_parses() {
+        let functions = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"streams":true},"functions":[{"module":"fixture","name":"events","symbol":"eqts_events","abi":"json","kind":{"kind":"stream","item":{"kind":"string"}},"parameters":[],"result":{"kind":"scalar","scalar":"u64"}}]}"#,
+        )
+        .expect("landed nested descriptor should parse");
+        assert!(matches!(functions[0].kind, ExportKind::Stream { .. }));
+    }
+
+    #[test]
+    fn native_reactive_constructors_use_json_arguments_and_handle_output() {
+        let mut function = reactive_function(ExportKind::Stream {
+            item: Type::Owned(OwnedType::String),
+        });
+        function.parameters = vec![Parameter {
+            name: "start_at".to_string(),
+            ty: Type::Scalar(Scalar::U64),
+        }];
+
+        let koffi = render_koffi("./fixture.dylib", std::slice::from_ref(&function));
+        assert!(
+            koffi.contains("[\"uint8_t *\", \"size_t\", koffi.out(koffi.pointer(\"uint64_t\"))]")
+        );
+        assert!(koffi.contains("JSON.stringify([startAt.toString()])"));
+        assert!(koffi.contains("(__eqtsInput, __eqtsInput.byteLength, __eqtsHandleOutput)"));
+
+        let bun = render_bun("./fixture.dylib", std::slice::from_ref(&function));
+        assert!(bun.contains("args: [FFIType.ptr, FFIType.u64, FFIType.ptr]"));
+        assert!(bun.contains(
+            "(ptr(__eqtsInput), BigInt(__eqtsInput.byteLength), ptr(__eqtsHandleOutput))"
+        ));
+
+        let deno = render_deno("./fixture.dylib", &[function]);
+        assert!(deno.contains("parameters: [\"buffer\", \"usize\", \"buffer\"]"));
+        assert!(deno.contains("(__eqtsInput, BigInt(__eqtsInput.byteLength), __eqtsHandleOutput)"));
+    }
+
+    #[test]
+    fn reactive_runtime_enforces_lifecycle_backpressure_and_js_dispatch() {
+        let loader = render_bridge_loader(
+            BridgeRuntime::NodeNapi,
+            &[
+                reactive_function(ExportKind::Stream {
+                    item: Type::Owned(OwnedType::String),
+                }),
+                reactive_function(ExportKind::Callback {
+                    value: Type::Owned(OwnedType::String),
+                    callback_parameter: "on_event".to_string(),
+                }),
+            ],
+        );
+        assert!(loader.contains("new FinalizationRegistry"));
+        assert!(loader.contains("if (disposed) return"));
+        assert!(loader.contains("USE_AFTER_DISPOSE"));
+        assert!(loader.contains("CONCURRENT_NEXT"));
+        assert!(loader.contains("poll.status === 13"));
+        assert!(!loader.contains("new Worker"));
+    }
+
+    #[test]
+    fn reactive_async_uses_abort_signal_and_cancels() {
+        let function = reactive_function(ExportKind::Async {
+            value: Type::Owned(OwnedType::String),
+        });
+        let declarations = render_declarations(std::slice::from_ref(&function));
+        assert!(declarations.contains("options?: { signal?: AbortSignal }"));
+        let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[function]);
+        assert!(loader.contains("signal?.aborted"));
+        assert!(loader.contains("bindings.eqtsReactiveCancel(handle)"));
+        assert!(loader.contains("removeEventListener"));
+    }
+
+    #[test]
+    fn callback_dispatch_is_js_threaded_and_errors_cancel_resource() {
+        let function = reactive_function(ExportKind::Callback {
+            value: Type::Owned(OwnedType::String),
+            callback_parameter: "on_event".to_string(),
+        });
+        let declarations = render_declarations(std::slice::from_ref(&function));
+        assert!(declarations.contains("onEvent: (value: string) => void | Promise<void>"));
+        let loader = render_bridge_loader(BridgeRuntime::NodeNapi, &[function]);
+        assert!(loader.contains("await callback(decode(__eqtsNormalize(poll.value)))"));
+        assert!(!loader.contains("for await (const event of resource)"));
+        assert!(loader.contains("bindings.eqtsReactiveCancel(handle)"));
+        assert!(loader.contains("queueMicrotask(() => { throw error; })"));
+    }
+
+    #[test]
+    fn object_and_trait_exports_fail_without_method_descriptors() {
+        for kind in [
+            ExportKind::Object {
+                value: Type::Owned(OwnedType::String),
+            },
+            ExportKind::Trait {
+                value: Type::Owned(OwnedType::String),
+            },
+        ] {
+            let error = normalized_metadata(vec![reactive_function(kind)])
+                .expect_err("methodless object or trait must fail");
+            assert!(error.to_string().contains("has no methods"));
+        }
+    }
+
+    #[test]
+    fn object_methods_generate_typed_disposable_invocation() {
+        let mut functions = parse_metadata(br#"{"schema_version":3,"capabilities":{"objects":true},"method_sets":[{"rust_type":"Counter","methods":[{"name":"increment","parameters":[{"name":"by","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"},"mutable":true,"asynchronous":false}]}],"functions":[{"module":"fixture","name":"counter","symbol":"eqts_counter","abi":"json","kind":{"kind":"object","value":{"kind":"record","name":"Counter","fields":[]}},"parameters":[],"result":{"kind":"scalar","scalar":"u64"}}]}"#).expect("object metadata parses");
+        functions[0].methods.push(Method {
+            name: "fetch".to_string(),
+            parameters: Vec::new(),
+            result: Type::Owned(OwnedType::String),
+            mutable: false,
+            asynchronous: true,
+        });
+        let declarations = render_declarations(&functions);
+        assert!(declarations.contains("increment(by: number): number"));
+        assert!(
+            declarations.contains("fetch(options?: { signal?: AbortSignal }): Promise<string>")
+        );
+        let bridge = render_bridge_loader(BridgeRuntime::NodeNapi, &functions);
+        assert!(bridge.contains("bindings.eqtsHandleInvoke(handle, \"increment\", [by])"));
+        assert!(bridge.contains("if (resource.disposed)"));
+        assert!(bridge.contains("bindings.eqtsHandleInvokeAsync(handle, \"fetch\", [])"));
+        assert!(bridge.contains("options.signal"));
+        let native = render_bun("./fixture.dylib", &functions);
+        assert!(native.contains("eqts_handle_invoke_v1"));
+        assert!(native.contains("eqts_handle_invoke_async_v1"));
+        assert!(native.contains("JSON.stringify({ method, arguments: __eqtsArguments })"));
+        assert!(!native.contains("method, arguments)"));
     }
 
     #[test]
@@ -1697,11 +2517,13 @@ mod tests {
             name: "toggle".to_string(),
             symbol: "custom_toggle".to_string(),
             abi: FunctionAbi::Scalar,
+            kind: ExportKind::Function,
             parameters: vec![Parameter {
                 name: "enabled".to_string(),
                 ty: Type::Scalar(Scalar::Bool),
             }],
             result: Type::Scalar(Scalar::I64),
+            methods: Vec::new(),
         };
         let loader = render_bun("./libmath.dylib", &[function]);
         assert!(loader.contains("custom_toggle"));
@@ -1728,6 +2550,7 @@ mod tests {
             name: "round_trip".to_string(),
             symbol: "eqts_round_trip".to_string(),
             abi: FunctionAbi::Json,
+            kind: ExportKind::Function,
             parameters: vec![Parameter {
                 name: "person".to_string(),
                 ty: person.clone(),
@@ -1736,6 +2559,7 @@ mod tests {
                 ok: Box::new(person),
                 error: Box::new(Type::Owned(OwnedType::String)),
             }),
+            methods: Vec::new(),
         }
     }
 
@@ -1805,6 +2629,7 @@ mod tests {
             name: "collision".to_string(),
             symbol: "eqts_collision".to_string(),
             abi: FunctionAbi::Json,
+            kind: ExportKind::Function,
             parameters: [
                 "input", "output", "status", "text", "decoded", "bytes", "pointer",
             ]
@@ -1815,6 +2640,7 @@ mod tests {
             })
             .collect(),
             result: Type::Owned(OwnedType::String),
+            methods: Vec::new(),
         };
         for loader in [
             render_koffi("./libfixture.dylib", std::slice::from_ref(&function)),
@@ -1851,6 +2677,7 @@ mod tests {
             name: "maybe_bytes".to_string(),
             symbol: "eqts_maybe_bytes".to_string(),
             abi: FunctionAbi::Json,
+            kind: ExportKind::Function,
             parameters: vec![Parameter {
                 name: "value".to_string(),
                 ty: Type::Owned(OwnedType::Bytes),
@@ -1858,6 +2685,7 @@ mod tests {
             result: Type::Owned(OwnedType::Option {
                 value: Box::new(Type::Owned(OwnedType::Bytes)),
             }),
+            methods: Vec::new(),
         };
         let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[function]);
         assert!(loader.contains("Array.from(value)"));

@@ -40,7 +40,7 @@
     "build:ffi": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target bun --release --out-dir dist && cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target deno --release --out-dir dist && cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target node-koffi --release --out-dir dist",
     "build:browser": "cargo run --manifest-path ../../Cargo.toml -p cargo-eqts -- eqts build --target wasm-browser --release --out-dir dist",
     "build": "bun run build:napi && bun run build:wasm && bun run build:ffi && bun run build:browser",
-    "test": "bun run build && bun test parity.test.ts",
+    "test": "bun run build && bun test parity.test.ts reactive.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:native": "tsc --noEmit --project tsconfig.native.json",
     "format": "biome format --write .",

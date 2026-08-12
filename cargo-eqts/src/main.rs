@@ -245,9 +245,14 @@ fn build_node_napi(package: &Package, release: bool, out_dir: &Path) -> Result<(
     let output = directory.join(out_dir).join(target_name(Target::NodeNapi));
     fs::create_dir_all(&output)?;
     let mut command = Command::new("bun");
-    command
-        .current_dir(&directory)
-        .args(["x", "napi", "build", "--platform", "--output-dir"]);
+    command.current_dir(&directory).args([
+        "x",
+        "--no-install",
+        "napi",
+        "build",
+        "--platform",
+        "--output-dir",
+    ]);
     command.arg(&output).args([
         "--js",
         "index.js",

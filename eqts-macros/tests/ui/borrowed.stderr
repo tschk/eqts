@@ -1,4 +1,4 @@
-error: unsupported eqts type
+error: eqts borrowed and stateful object values are not supported across every transport
  --> tests/ui/borrowed.rs:4:22
   |
 4 | pub fn length(value: &str) -> u32 {

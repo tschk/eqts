@@ -1,6 +1,6 @@
 [package]
 name = "eqts"
-version = "0.1.0"
+version = "0.1.1"
 description = "One Rust API for TypeScript across native JavaScript runtimes"
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-eqts-macros = { path = "../eqts-macros", version = "0.1.0" }
+eqts-macros = { path = "../eqts-macros", version = "0.1.1" }
 inventory = "0.3"
-napi = { version = "=3.12.1", default-features = false, features = ["napi4", "serde-json"], optional = true }
+napi = { version = "=3.12.1", default-features = false, features = ["napi6", "serde-json"], optional = true }
 napi-derive = { version = "=3.6.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

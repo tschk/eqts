@@ -16,6 +16,12 @@ const nativeBytes: Uint8Array = bunFfi.reverseBytes(new Uint8Array([1, 2, 3]));
 const nativeOption: string | null = denoFfi.maybeName(true);
 const nativeStatus: koffi.Status = koffi.currentStatus();
 const browserStatus: browserWasm.Status = "Ready";
+const napiWide: bigint = napi.addI64(40n, 2n);
+const wasmWide: bigint = wasm.addI64(40n, 2n);
+const unsignedWide: bigint = napi.addU64(40n, 2n);
+const optionalBytes: Uint8Array | null = bunFfi.maybeBytes(true);
+const nestedValues: Array<number> = denoFfi.flattenValues([[1], [2]]);
+const structuredResult: koffi.Person = koffi.personOrError(true);
 
 if (
   napiResult !== wasmResult ||
@@ -25,7 +31,12 @@ if (
   nativeBytes.length !== 3 ||
   nativeOption !== "eqts" ||
   nativeStatus !== "Ready" ||
-  browserStatus !== "Ready"
+  browserStatus !== "Ready" ||
+  napiWide !== wasmWide ||
+  unsignedWide !== 42n ||
+  optionalBytes?.length !== 3 ||
+  nestedValues.length !== 2 ||
+  structuredResult.name !== "Ada"
 ) {
   throw new Error("backend parity failed");
 }

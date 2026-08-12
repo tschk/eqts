@@ -2,7 +2,7 @@
 
 One Rust API, imported from TypeScript through a selected native runtime.
 
-Current implementation generates adapters for Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and browser Wasm. The shared API supports fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums. Every adapter executes successfully on macOS arm64.
+Current implementation generates adapters for Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and browser Wasm. The shared API supports fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums.
 
 ```rust
 eqts::setup!();
@@ -14,7 +14,7 @@ pub fn add(a: u32, b: u32) -> u32 {
 ```
 
 ```bash
-cargo install --path cargo-eqts
+cargo install cargo-eqts
 cargo eqts build --target all --release
 ```
 

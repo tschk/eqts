@@ -1,0 +1,5 @@
+error: eqts trait, iterator, and stream exports are not supported across every transport
+ --> tests/ui/iterator.rs:4:20
+  |
+4 | pub fn values() -> impl Iterator<Item = u32> {
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^

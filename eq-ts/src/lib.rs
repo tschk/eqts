@@ -21,7 +21,34 @@ pub const ABI_ENCODE_ERROR: i32 = 4;
 #[derive(Debug, serde::Serialize)]
 pub struct Metadata {
     pub schema_version: u32,
+    pub capabilities: Capabilities,
     pub functions: Vec<Function>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[expect(clippy::struct_excessive_bools)]
+pub struct Capabilities {
+    pub owned_values: bool,
+    pub objects: bool,
+    pub async_functions: bool,
+    pub callbacks: bool,
+    pub traits: bool,
+    pub streams: bool,
+    pub iterators: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            owned_values: true,
+            objects: false,
+            async_functions: false,
+            callbacks: false,
+            traits: false,
+            streams: false,
+            iterators: false,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -295,6 +322,7 @@ pub fn metadata_json() -> &'static [u8] {
         functions.sort_unstable_by_key(|function| (function.module, function.name));
         serde_json::to_vec(&Metadata {
             schema_version: 2,
+            capabilities: Capabilities::default(),
             functions,
         })
         .unwrap_or_else(|error| format!(r#"{{"schema_version":2,"error":"{error}"}}"#).into_bytes())
@@ -357,7 +385,12 @@ mod tests {
 
     #[test]
     fn empty_inventory_has_versioned_metadata() {
-        assert_eq!(metadata_json(), br#"{"schema_version":2,"functions":[]}"#);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(metadata_json()).expect("metadata must be valid JSON");
+        assert_eq!(metadata["schema_version"], 2);
+        assert_eq!(metadata["capabilities"]["owned_values"], true);
+        assert_eq!(metadata["capabilities"]["async_functions"], false);
+        assert_eq!(metadata["functions"], serde_json::json!([]));
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error: eqts callbacks are not supported across every transport
+ --> tests/ui/callback.rs:4:25
+  |
+4 | pub fn invoke(callback: fn(u32) -> u32) -> u32 {
+  |                         ^^^^^^^^^^^^^^

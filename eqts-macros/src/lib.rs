@@ -68,6 +68,7 @@ fn expand_export(function: &ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
+#[expect(clippy::too_many_lines)]
 fn expand_scalar(
     function: &ItemFn,
     name: &syn::Ident,
@@ -106,11 +107,45 @@ fn expand_scalar(
             quote!(#ident: #ty)
         })
         .collect::<Vec<_>>();
+    let napi_inputs = arguments
+        .iter()
+        .zip(typed)
+        .map(|(argument, kind)| {
+            let ident = plain_ident(argument).expect("validated parameter");
+            if kind.is_64_bit() {
+                quote!(#ident: ::eqts::napi::bindgen_prelude::BigInt)
+            } else {
+                let ty = &argument.ty;
+                quote!(#ident: #ty)
+            }
+        })
+        .collect::<Vec<_>>();
+    let napi_conversions = arguments.iter().zip(typed).map(|(argument, kind)| {
+        let ident = plain_ident(argument).expect("validated parameter");
+        let TypeKind::Scalar(scalar) = kind else { return quote!(); };
+        if scalar == "U64" { quote!(let (_, #ident, lossless) = #ident.get_u64(); if !lossless { return Err(::eqts::napi::Error::from_reason("u64 BigInt is out of range")); }) }
+        else if scalar == "I64" { quote!(let (#ident, lossless) = #ident.get_i64(); if !lossless { return Err(::eqts::napi::Error::from_reason("i64 BigInt is out of range")); }) }
+        else { quote!() }
+    }).collect::<Vec<_>>();
     let direct_calls = arguments
         .iter()
         .map(|argument| plain_ident(argument).expect("validated parameter"))
         .collect::<Vec<_>>();
     let direct_output = &function.sig.output;
+    let rust_result_ty = match &function.sig.output {
+        ReturnType::Default => quote!(()),
+        ReturnType::Type(_, ty) => quote!(#ty),
+    };
+    let napi_output = if result.is_64_bit() {
+        quote!(-> ::eqts::napi::Result<::eqts::napi::bindgen_prelude::BigInt>)
+    } else {
+        quote!(-> ::eqts::napi::Result<#rust_result_ty>)
+    };
+    let napi_call = if result.is_64_bit() {
+        quote!(Ok(#name(#(#direct_calls),*).into()))
+    } else {
+        quote!(Ok(#name(#(#direct_calls),*)))
+    };
     let (output, invoke) = if matches!(result, TypeKind::Void) {
         (
             quote!(),
@@ -138,7 +173,7 @@ fn expand_scalar(
         &quote! {
             #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
             #[::eqts::napi_derive::napi(js_name = #js_name)]
-            fn #napi_bridge(#(#direct_inputs),*) #direct_output { #name(#(#direct_calls),*) }
+            fn #napi_bridge(#(#napi_inputs),*) #napi_output { #(#napi_conversions)* #napi_call }
 
             #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
             #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
@@ -425,6 +460,9 @@ impl TypeKind {
     fn is_bool(&self) -> bool {
         matches!(self, Self::Scalar(value) if value == "Bool")
     }
+    fn is_64_bit(&self) -> bool {
+        matches!(self, Self::Scalar(value) if value == "U64" || value == "I64")
+    }
     fn abi_type(&self) -> proc_macro2::TokenStream {
         match self {
             Self::Scalar(value) if value == "Bool" => quote!(u8),
@@ -461,7 +499,35 @@ impl TypeKind {
         }
     }
 }
+#[expect(clippy::too_many_lines)]
 fn type_kind(ty: &Type) -> syn::Result<TypeKind> {
+    match ty {
+        Type::BareFn(_) => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "eqts callbacks are not supported across every transport",
+            ));
+        }
+        Type::ImplTrait(_) => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "eqts trait, iterator, and stream exports are not supported across every transport",
+            ));
+        }
+        Type::TraitObject(_) => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "eqts trait objects are not supported across every transport",
+            ));
+        }
+        Type::Reference(_) => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "eqts borrowed and stateful object values are not supported across every transport",
+            ));
+        }
+        _ => {}
+    }
     let Type::Path(path) = ty else {
         return Err(syn::Error::new_spanned(ty, "unsupported eqts type"));
     };
@@ -524,6 +590,13 @@ fn type_kind(ty: &Type) -> syn::Result<TypeKind> {
         return Ok(TypeKind::Result(
             Box::new(type_kind(ok)?),
             Box::new(type_kind(error)?),
+        ));
+    }
+    if segment.ident == "Box" {
+        type_kind(one_argument(segment)?)?;
+        return Err(syn::Error::new_spanned(
+            ty,
+            "eqts owned boxes are not supported across every transport",
         ));
     }
     if matches!(segment.arguments, PathArguments::None) {

@@ -15,7 +15,7 @@ one Rust surface
 
 ## Status
 
-The first public type surface is complete: fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums. Shared annotated functions execute through Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and initialized browser Wasm on macOS arm64. Metadata is deterministic and versioned; the native ABI catches panics, returns status codes, and explicitly frees owned output buffers. CI and tag-driven prebuilt artifact workflows cover macOS, Linux glibc, Linux musl compilation, and Windows; live remote Linux verification and registry publishing remain release work.
+The first public type surface is complete: fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums. Shared annotated functions execute through Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and initialized browser Wasm. Metadata is deterministic and versioned; the native ABI catches panics, returns status codes, and explicitly frees owned output buffers. CI and tag-driven prebuilt artifact workflows cover macOS, Linux glibc, Linux musl, and Windows. The Rust crates are published on crates.io.
 
 ## Public surface
 
@@ -43,7 +43,9 @@ Node-API uses napi-rs. Koffi, Bun, and Deno share a stable C ABI dynamic library
 2. Add canonical declarations and owned value types.
 3. Add Node-API as the default packaged target.
 4. Add Wasm with separate runtime verification.
-5. Add objects, async functions, callbacks, traits, streams, and iterators only after identical behavior exists on every transport.
+5. Specify lifecycle semantics for stateful objects, async functions, callbacks, traits, streams, and iterators before adding them. Until then, metadata declares them unsupported and macros reject them with targeted compile errors rather than emitting transport-specific APIs.
+
+Named records already provide structural TypeScript objects by value. Stateful objects remain separate because they require an explicit handle lifetime and disposal contract. Async functions require cancellation semantics; callbacks require ownership and thread-affinity rules; streams and iterators require cancellation, backpressure, and disposal rules; traits require an object-model decision. Those contracts are intentionally not inferred from one transport.
 
 ## Acceptance
 

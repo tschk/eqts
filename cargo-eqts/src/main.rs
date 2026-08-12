@@ -48,6 +48,7 @@ enum Target {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Function {
     module: String,
     name: String,
@@ -59,8 +60,11 @@ struct Function {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MetadataDocument {
     schema_version: u32,
+    #[serde(default)]
+    capabilities: std::collections::BTreeMap<String, bool>,
     functions: Vec<Function>,
 }
 
@@ -71,6 +75,7 @@ struct MetadataSlice {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Parameter {
     name: String,
     #[serde(alias = "scalar")]
@@ -110,6 +115,11 @@ impl<'de> Deserialize<'de> for Type {
             }
         };
         if kind == "scalar" {
+            if value.as_object().is_some_and(|object| object.len() != 2) {
+                return Err(serde::de::Error::custom(
+                    "scalar type contains unsupported metadata fields",
+                ));
+            }
             let scalar = value
                 .get("scalar")
                 .cloned()
@@ -129,6 +139,7 @@ impl<'de> Deserialize<'de> for Type {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 enum OwnedType {
     String,
     Bytes,
@@ -140,6 +151,7 @@ enum OwnedType {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Field {
     name: String,
     ty: Type,
@@ -589,7 +601,42 @@ fn parse_metadata(bytes: &[u8]) -> Result<Vec<Function>> {
             document.schema_version
         );
     }
+    validate_capabilities(document.capabilities)?;
     Ok(document.functions)
+}
+
+fn validate_capabilities(capabilities: std::collections::BTreeMap<String, bool>) -> Result<()> {
+    let known = [
+        "owned_values",
+        "objects",
+        "async_functions",
+        "callbacks",
+        "traits",
+        "streams",
+        "iterators",
+    ];
+    let unknown = capabilities
+        .keys()
+        .filter(|name| !known.contains(&name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        bail!(
+            "metadata declares unknown eqts capabilities: {}",
+            unknown.join(", ")
+        );
+    }
+    let unsupported = capabilities
+        .into_iter()
+        .filter_map(|(name, enabled)| (enabled && name != "owned_values").then_some(name))
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        bail!(
+            "metadata requires unsupported eqts capabilities: {}",
+            unsupported.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn normalized_metadata(mut functions: Vec<Function>) -> Result<Vec<Function>> {
@@ -1590,6 +1637,51 @@ mod tests {
         let error = parse_metadata(br#"{"schema_version":3,"functions":[]}"#)
             .expect_err("unknown schema must fail");
         assert!(error.to_string().contains("schema version 3"));
+    }
+
+    #[test]
+    fn unsupported_future_capabilities_are_rejected_strictly() {
+        for metadata in [
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","async":true,"parameters":[],"result":{"kind":"string"}}]}"#.as_slice(),
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","parameters":[{"name":"callback","ty":{"kind":"callback"}}],"result":{"kind":"string"}}]}"#.as_slice(),
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","parameters":[],"result":{"kind":"object","name":"Worker"}}]}"#.as_slice(),
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","parameters":[],"result":{"kind":"stream","value":{"kind":"string"}}}]}"#.as_slice(),
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","parameters":[],"result":{"kind":"iterator","value":{"kind":"string"}}}]}"#.as_slice(),
+            br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","parameters":[],"result":{"kind":"trait","name":"Worker"}}]}"#.as_slice(),
+        ] {
+            assert!(parse_metadata(metadata).is_err());
+        }
+    }
+
+    #[test]
+    fn scalar_type_rejects_unrecognized_capability_fields() {
+        let metadata = br#"{"schema_version":2,"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"scalar","parameters":[],"result":{"kind":"scalar","scalar":"u32","stream":true}}]}"#;
+        assert!(parse_metadata(metadata).is_err());
+    }
+
+    #[test]
+    fn declared_capabilities_allow_owned_values_only() {
+        let metadata = br#"{"schema_version":2,"capabilities":{"owned_values":true,"objects":false,"async_functions":false,"callbacks":false,"traits":false,"streams":false,"iterators":false},"functions":[]}"#;
+        assert!(parse_metadata(metadata).is_ok());
+    }
+
+    #[test]
+    fn declared_unsupported_capability_fails_before_codegen() {
+        for capability in [
+            "objects",
+            "async_functions",
+            "callbacks",
+            "traits",
+            "streams",
+            "iterators",
+        ] {
+            let metadata = format!(
+                r#"{{"schema_version":2,"capabilities":{{"owned_values":true,"{capability}":true}},"functions":[]}}"#
+            );
+            let error = parse_metadata(metadata.as_bytes())
+                .expect_err("unsupported capability must stop generation");
+            assert!(error.to_string().contains("unsupported eqts capabilities"));
+        }
     }
 
     #[test]

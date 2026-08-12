@@ -1,0 +1,5 @@
+error: eqts trait objects are not supported across every transport
+ --> tests/ui/trait_object.rs:4:27
+  |
+4 | pub fn consume(value: Box<dyn Send>) -> u32 {
+  |                           ^^^^^^^^

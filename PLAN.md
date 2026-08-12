@@ -15,11 +15,11 @@ one Rust surface
 
 ## Status
 
-The first public type surface is complete: fixed-width scalars, strings, bytes, vectors, options, results, named records, and unit enums. Shared annotated functions execute through Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and initialized browser Wasm. Metadata is deterministic and versioned; the native ABI catches panics, returns status codes, and explicitly frees owned output buffers. CI and tag-driven prebuilt artifact workflows cover macOS, Linux glibc, Linux musl, and Windows. The Rust crates are published on crates.io.
+The public type and lifecycle surfaces are complete for synchronous functions, fixed-width scalars, strings, bytes, vectors, options, results, named records, unit enums, async functions, callbacks, streams, iterators, and stateful object or structural-trait proxies. Shared annotated APIs execute through Node-API, Node with Koffi, Bun FFI, Deno FFI, Node-compatible Wasm, and initialized browser Wasm. Metadata is deterministic and versioned; the native ABI catches panics, returns status codes, explicitly frees owned output buffers, and manages opaque handles. CI and tag-driven prebuilt artifact workflows cover macOS, Linux glibc, Linux musl, and Windows. The Rust crates are published on crates.io.
 
 ## Public surface
 
-The Rust package exposes `eqts::setup!()`, `#[eqts::export]`, `eqts::Record`, and `eqts::Enum`. The first release supports functions, numeric scalars, booleans, strings, bytes, records, enums, `Option`, `Result`, and vectors. Unsupported signatures fail during compilation rather than becoming pointers or TypeScript `any`.
+The Rust package exposes `eqts::setup!()`, `#[eqts::export]`, reactive export attributes, `#[eqts::methods]`, `eqts::Record`, and `eqts::Enum`. Supported values include numeric scalars, booleans, strings, bytes, records, enums, `Option`, `Result`, and vectors. Unsupported signatures fail during compilation rather than becoming pointers or TypeScript `any`.
 
 Cargo features select available transports:
 
@@ -43,9 +43,9 @@ Node-API uses napi-rs. Koffi, Bun, and Deno share a stable C ABI dynamic library
 2. Add canonical declarations and owned value types.
 3. Add Node-API as the default packaged target.
 4. Add Wasm with separate runtime verification.
-5. Specify lifecycle semantics for stateful objects, async functions, callbacks, traits, streams, and iterators before adding them. Until then, metadata declares them unsupported and macros reject them with targeted compile errors rather than emitting transport-specific APIs.
+5. Add one shared lifecycle contract for stateful objects, async functions and methods, callbacks, structural traits, streams, and iterators.
 
-Named records already provide structural TypeScript objects by value. Stateful objects remain separate because they require an explicit handle lifetime and disposal contract. Async functions require cancellation semantics; callbacks require ownership and thread-affinity rules; streams and iterators require cancellation, backpressure, and disposal rules; traits require an object-model decision. Those contracts are intentionally not inferred from one transport.
+All five delivery stages are implemented. Reactive metadata uses explicit export and method descriptors. Async work accepts `AbortSignal`; callbacks run on the JavaScript thread; streams and iterators use a demand-driven `AsyncIterable` with a single outstanding request; and stateful handles provide explicit, idempotent disposal plus automatic finalization. Structural-trait exports use the same typed proxy model as objects. Arbitrary Rust trait objects and mutable async receivers remain compile-time errors rather than transport-specific escape hatches.
 
 ## Acceptance
 

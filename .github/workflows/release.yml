@@ -68,6 +68,10 @@ jobs:
         run: cargo eqts build --target wasm-browser --release
       - working-directory: examples/add
         run: bun run typecheck
+      - working-directory: examples/add
+        run: bun run format:check
+      - working-directory: examples/add
+        run: bun run lint
       - uses: actions/upload-artifact@v4
         with:
           name: eqts-wasm

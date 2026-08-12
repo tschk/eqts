@@ -107,7 +107,11 @@ jobs:
       - working-directory: examples/add
         run: bun -e 'const m=await import("./dist/wasm-browser/index.js"); await m.initialize(); if(m.add(20,22)!==42) throw new Error("browser Wasm parity failed");'
       - working-directory: examples/add
-        run: bun test parity.test.ts
+        run: bun run format:check
+      - working-directory: examples/add
+        run: bun run lint
+      - working-directory: examples/add
+        run: bun test parity.test.ts reactive.test.ts
       - working-directory: examples/add
         run: bun run typecheck
       - working-directory: examples/add

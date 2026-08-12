@@ -85,9 +85,11 @@ jobs:
           toolchain: 1.88.0
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - run: cargo build --manifest-path examples/add/Cargo.toml --release --locked --target x86_64-unknown-linux-musl --no-default-features --features node-koffi,bun,deno
-      - run: musl-gcc -shared -Wl,--whole-archive examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.a -Wl,--no-whole-archive -o examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
+      - run: zig cc -target x86_64-linux-musl -shared -Wl,--whole-archive examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.a -Wl,--no-whole-archive -lunwind -o examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
       - run: nm -g examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so | grep ' T eqts_metadata_v1'
       - uses: actions/upload-artifact@v4
         with:

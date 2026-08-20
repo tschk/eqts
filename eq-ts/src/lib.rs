@@ -911,4 +911,38 @@ mod tests {
         let status = unsafe { __private::write_output::<u32>(std::ptr::null_mut(), 42) };
         assert_eq!(status, ABI_NULL_OUTPUT);
     }
+
+    #[test]
+    fn u64_json_requires_a_decimal_string() {
+        assert_eq!(
+            u64::from_json(serde_json::json!("42")).expect("decimal string"),
+            42
+        );
+        assert!(u64::from_json(serde_json::json!(42)).is_err());
+        assert!(u64::from_json(serde_json::json!("")).is_err());
+        assert!(u64::from_json(serde_json::json!("-1")).is_err());
+    }
+
+    #[test]
+    fn vec_json_requires_an_array() {
+        assert_eq!(
+            Vec::<u32>::from_json(serde_json::json!([1, 2])).expect("array"),
+            vec![1, 2]
+        );
+        assert!(Vec::<u32>::from_json(serde_json::json!("no")).is_err());
+    }
+
+    #[test]
+    fn result_json_requires_ok_or_error() {
+        assert_eq!(
+            Result::<u32, String>::from_json(serde_json::json!({"ok": 7})).expect("ok"),
+            Ok(7)
+        );
+        assert_eq!(
+            Result::<u32, String>::from_json(serde_json::json!({"error": "no"})).expect("error"),
+            Err("no".into())
+        );
+        assert!(Result::<u32, String>::from_json(serde_json::json!({})).is_err());
+        assert!(Result::<u32, String>::from_json(serde_json::json!([])).is_err());
+    }
 }

@@ -1,0 +1,5 @@
+error: Record requires named fields
+ --> tests/ui/tuple_record.rs:4:17
+  |
+4 | pub struct Point(pub u32, pub u32);
+  |                 ^^^^^^^^^^^^^^^^^^

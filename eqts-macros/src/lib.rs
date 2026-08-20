@@ -887,4 +887,13 @@ mod tests {
         assert!(output.contains("serialize_maps_as_objects"));
         assert!(output.contains("Value :: String (message) => message"));
     }
+
+    #[test]
+    fn camel_case_converts_snake_identifiers() {
+        assert_eq!(camel_case("add"), "add");
+        assert_eq!(camel_case("add_u64"), "addU64");
+        assert_eq!(camel_case("eqts_handle_invoke"), "eqtsHandleInvoke");
+        assert_eq!(camel_case("foo__bar"), "fooBar");
+        assert_eq!(camel_case("_leading"), "Leading");
+    }
 }

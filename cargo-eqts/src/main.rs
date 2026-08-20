@@ -985,26 +985,42 @@ fn load_metadata(library_path: &Path) -> Result<Vec<Function>> {
 }
 
 fn parse_metadata(bytes: &[u8]) -> Result<Vec<Function>> {
-    let mut document: MetadataDocument =
+    let raw: serde_json::Value =
         serde_json::from_slice(bytes).context("eqts metadata is invalid JSON")?;
+    if raw
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(3)
+    {
+        let reactive_capabilities = raw
+            .get("capabilities")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|(name, value)| name != "owned_values" && value.as_bool() == Some(true))
+            });
+        let missing_kind = raw
+            .get("functions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|functions| {
+                !functions.is_empty()
+                    && functions
+                        .iter()
+                        .any(|function| function.get("kind").is_none())
+            });
+        if reactive_capabilities && missing_kind {
+            bail!(
+                "eqts metadata schema version 3 declares reactive capabilities without per-export descriptors; cannot distinguish ordinary u64 values from reactive handles or generate parity-safe loaders"
+            );
+        }
+    }
+    let mut document: MetadataDocument =
+        serde_json::from_value(raw).context("eqts metadata is invalid JSON")?;
     if !matches!(document.schema_version, 1..=3) {
         bail!(
             "unsupported eqts metadata schema version {}; expected 1, 2, or 3",
             document.schema_version
-        );
-    }
-    if document.schema_version == 3
-        && document
-            .functions
-            .iter()
-            .all(|function| matches!(function.kind, ExportKind::Function))
-        && document
-            .capabilities
-            .iter()
-            .any(|(name, enabled)| *enabled && name != "owned_values")
-    {
-        bail!(
-            "eqts metadata schema version 3 declares reactive capabilities without per-export descriptors; cannot distinguish ordinary u64 values from reactive handles or generate parity-safe loaders"
         );
     }
     if document.schema_version < 3 {
@@ -1248,6 +1264,7 @@ fn validate_identifier(value: &str) -> Result<()> {
             | "import"
             | "in"
             | "instanceof"
+            | "let"
             | "new"
             | "null"
             | "return"
@@ -2094,6 +2111,7 @@ fn deno_type(scalar: Scalar) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     fn add_function() -> Function {
         Function {
@@ -2181,7 +2199,7 @@ mod tests {
 
     #[test]
     fn invalid_identifiers_are_rejected() {
-        for identifier in ["", "two words", "9lives", "default"] {
+        for identifier in ["", "two words", "9lives", "default", "let"] {
             assert!(validate_identifier(identifier).is_err(), "{identifier:?}");
         }
     }
@@ -2211,6 +2229,9 @@ mod tests {
 
     #[test]
     fn individual_compiled_targets_are_selected() {
+        assert_eq!(selected_targets(Target::NodeKoffi), [Target::NodeKoffi]);
+        assert_eq!(selected_targets(Target::Bun), [Target::Bun]);
+        assert_eq!(selected_targets(Target::Deno), [Target::Deno]);
         assert_eq!(selected_targets(Target::NodeNapi), [Target::NodeNapi]);
         assert_eq!(selected_targets(Target::Wasm), [Target::Wasm]);
         assert_eq!(selected_targets(Target::WasmBrowser), [Target::WasmBrowser]);
@@ -2309,6 +2330,112 @@ mod tests {
         let error = parse_metadata(metadata).expect_err("ambiguous reactive handle must fail");
         assert!(error.to_string().contains("without per-export descriptors"));
         assert!(error.to_string().contains("ordinary u64 values"));
+    }
+
+    #[test]
+    fn schema_v3_explicit_function_exports_parse_with_default_capabilities() {
+        let functions = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"example","name":"add","symbol":"eqts_add","abi":"scalar","kind":{"kind":"function"},"parameters":[{"name":"left","ty":{"kind":"scalar","scalar":"u32"}},{"name":"right","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"}}],"method_sets":[]}"#,
+        )
+        .expect("ordinary schema v3 functions must parse when kind is explicit");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
+        assert!(matches!(functions[0].kind, ExportKind::Function));
+    }
+
+    #[test]
+    fn schema_v3_empty_inventory_parses_with_default_capabilities() {
+        parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[],"method_sets":[]}"#,
+        )
+        .expect("empty schema v3 metadata must parse");
+    }
+
+    #[test]
+    fn unknown_export_kind_is_rejected() {
+        let error = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true},"functions":[{"module":"fixture","name":"work","symbol":"eqts_work","abi":"json","kind":"teleport","parameters":[],"result":{"kind":"scalar","scalar":"u64"}}]}"#,
+        )
+        .expect_err("unknown export kind must fail");
+        assert!(format!("{error:#}").contains("unknown export kind teleport"));
+    }
+
+    #[test]
+    fn empty_module_is_rejected() {
+        let mut function = add_function();
+        function.module.clear();
+        let error = normalized_metadata(vec![function]).expect_err("empty module must fail");
+        assert!(error.to_string().contains("empty module"));
+    }
+
+    #[test]
+    fn invalid_symbols_are_rejected() {
+        for symbol in ["", "1add", "eqts-add"] {
+            let mut function = add_function();
+            function.symbol = symbol.to_string();
+            assert!(normalized_metadata(vec![function]).is_err(), "{symbol:?}");
+        }
+    }
+
+    #[test]
+    fn empty_enum_is_rejected() {
+        let mut function = add_function();
+        function.abi = FunctionAbi::Json;
+        function.result = Type::Owned(OwnedType::Enum {
+            name: "Empty".to_string(),
+            variants: Vec::new(),
+        });
+        let error = normalized_metadata(vec![function]).expect_err("empty enum must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must contain at least one variant")
+        );
+    }
+
+    #[test]
+    fn typescript_names_camel_case_snake_identifiers() {
+        assert_eq!(typescript_name("add"), "add");
+        assert_eq!(typescript_name("add_u64"), "addU64");
+        assert_eq!(typescript_name("on_event_name"), "onEventName");
+        assert_eq!(typescript_name("foo__bar"), "fooBar");
+        assert_eq!(typescript_name("_leading"), "Leading");
+    }
+
+    #[test]
+    fn cli_build_parses_target_and_defaults() {
+        let cli = Cli::try_parse_from(["cargo", "eqts", "build", "--target", "bun"])
+            .expect("valid CLI must parse");
+        match cli.command {
+            Commands::Eqts {
+                command:
+                    EqtsCommand::Build {
+                        target,
+                        release,
+                        out_dir,
+                    },
+            } => {
+                assert_eq!(target, Target::Bun);
+                assert!(!release);
+                assert_eq!(out_dir, PathBuf::from("dist"));
+            }
+        }
+    }
+
+    #[test]
+    fn cli_build_requires_a_target() {
+        let Err(error) = Cli::try_parse_from(["cargo", "eqts", "build"]) else {
+            panic!("target is required");
+        };
+        assert!(error.to_string().contains("required"));
+    }
+
+    #[test]
+    fn cli_build_rejects_unknown_targets() {
+        let Err(error) = Cli::try_parse_from(["cargo", "eqts", "build", "--target", "jvm"]) else {
+            panic!("unknown target must fail");
+        };
+        assert!(error.to_string().contains("invalid value"));
     }
 
     fn reactive_function(kind: ExportKind) -> Function {

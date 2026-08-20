@@ -1,0 +1,7 @@
+error: methods requires an inherent impl
+  --> tests/ui/trait_impl_methods.rs:10:1
+   |
+10 | / impl Greeter for Person {
+11 | |     fn greet(&self) {}
+12 | | }
+   | |_^

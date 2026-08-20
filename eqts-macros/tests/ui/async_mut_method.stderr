@@ -1,0 +1,5 @@
+error: async methods cannot use &mut self
+ --> tests/ui/async_mut_method.rs:9:23
+  |
+9 |     pub async fn bump(&mut self) {
+  |                       ^^^^^^^^^

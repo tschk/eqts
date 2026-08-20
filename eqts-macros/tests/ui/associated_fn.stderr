@@ -1,0 +1,5 @@
+error: method requires a receiver
+ --> tests/ui/associated_fn.rs:7:9
+  |
+7 |     pub fn create() -> Self {
+  |         ^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: eqts exports require safe Rust functions
+ --> tests/ui/unsafe_fn.rs:4:5
+  |
+4 | pub unsafe fn value() -> u32 {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^

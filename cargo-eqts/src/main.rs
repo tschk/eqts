@@ -569,7 +569,7 @@ fn render_bridge_loader(runtime: BridgeRuntime, functions: &[Function]) -> Strin
 }
 
 fn reactive_runtime() -> &'static str {
-    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  const iterator = __eqtsHandle(handle, decode);\n  try {\n    const result = await iterator.next();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { iterator.dispose(); signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
+    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } catch (error) { resource.dispose(); throw error; } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  const iterator = __eqtsHandle(handle, decode);\n  try {\n    const result = await iterator.next();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { iterator.dispose(); signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
 }
 
 fn render_reactive_function(output: &mut String, function: &Function) {
@@ -2553,6 +2553,35 @@ mod tests {
         fs::write(
             temporary.path().join("test.js"),
             "import { events } from './index.js'; import { disposals } from './bindings.js'; let rejected = false; try { await events(); } catch (error) { rejected = error.code === 'REACTIVE_POLL'; } if (!rejected || disposals !== 1) throw new Error(`cleanup failure: ${rejected} ${disposals}`);",
+        )
+        .expect("write test");
+        let status = Command::new("bun")
+            .arg("test.js")
+            .current_dir(temporary.path())
+            .status()
+            .expect("Bun must be installed for generated JavaScript tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn reactive_stream_disposes_handle_when_polling_fails() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let function = reactive_function(ExportKind::Stream {
+            item: Type::Owned(OwnedType::String),
+        });
+        fs::write(
+            temporary.path().join("bindings.js"),
+            "export let disposals = 0; export function events() { return 7n; } export function eqtsReactivePoll() { return { status: 99, value: null }; } export function eqtsReactiveCancel() {} export function eqtsHandleDispose() { disposals++; }",
+        )
+        .expect("write bindings");
+        fs::write(
+            temporary.path().join("index.js"),
+            render_bridge_loader(BridgeRuntime::NodeNapi, &[function]),
+        )
+        .expect("write loader");
+        fs::write(
+            temporary.path().join("test.js"),
+            "import { events } from './index.js'; import { disposals } from './bindings.js'; const stream = events(); let rejected = false; try { await stream.next(); } catch (error) { rejected = error.code === 'REACTIVE_POLL'; } if (!rejected || !stream.disposed || disposals !== 1) throw new Error(`cleanup failure: ${rejected} ${stream.disposed} ${disposals}`);",
         )
         .expect("write test");
         let status = Command::new("bun")

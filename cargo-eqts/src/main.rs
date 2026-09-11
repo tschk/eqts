@@ -1603,10 +1603,17 @@ fn render_bun(path: &str, functions: &[Function]) -> String {
     }
     output.push_str("});\n\n");
     output.push_str(js_helpers());
+    if functions
+        .iter()
+        .any(|function| function.abi == FunctionAbi::Json)
+        || reactive
+    {
+        output.push_str(bun_owned_buffer_helper());
+    }
     output.push('\n');
     if reactive {
-        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, ptr(output)); let value = null; try { if (output[0] !== 0n) value = JSON.parse(new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice())); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
-        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); let text = \"\"; try { if (output[0] !== 0n) text = new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice()); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
+        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, ptr(output)); let value = null; try { if (output[0] !== 0n) value = JSON.parse(new TextDecoder().decode(__eqtsReadOwned(output))); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
+        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); let text = \"\"; try { if (output[0] !== 0n) text = new TextDecoder().decode(__eqtsReadOwned(output)); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
         output.push_str("bindings.eqtsHandleInvokeAsync = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(1); const status = symbols.eqts_handle_invoke_async_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); checkStatus(status, method); return output[0]; };\n\n");
         output.push_str(reactive_runtime());
     }
@@ -1705,6 +1712,10 @@ fn js_helpers() -> &'static str {
     "export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\nfunction __eqtsNormalize(value) {\n  if (value instanceof Map) return Object.fromEntries(Array.from(value, ([key, entry]) => [key, __eqtsNormalize(entry)]));\n  if (Array.isArray(value)) return value.map(__eqtsNormalize);\n  return value;\n}\n\nfunction checkStatus(status, name, detail) {\n  if (status === 0) return;\n  const code = { 1: \"RUST_PANIC\", 2: \"NULL_OUTPUT\", 3: \"INVALID_INPUT\", 4: \"ENCODE_FAILURE\" }[status] ?? \"ABI_ERROR\";\n  throw new EqtsError(code, detail || `eqts call ${name} failed with ABI status ${status}`);\n}\n"
 }
 
+fn bun_owned_buffer_helper() -> &'static str {
+    "function __eqtsReadOwned(output) {\n  const address = output[0];\n  const length = output[1];\n  if (address === 0n || length === 0n) return new Uint8Array();\n  if (length > 2147483647n) throw new EqtsError(\"ENCODE_FAILURE\", \"owned buffer length exceeds JavaScript limits\");\n  return new Uint8Array(toArrayBuffer(address, 0, Number(length))).slice();\n}\n"
+}
+
 fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtime) {
     let parameters = function
         .parameters
@@ -1748,7 +1759,7 @@ fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtim
                 function.symbol
             )
             .expect("writing to a string cannot fail");
-            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput[0] !== 0n) {\n      const __eqtsBytes = new Uint8Array(toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))).slice();\n      __eqtsText = new TextDecoder().decode(__eqtsBytes);\n    }\n  } finally {\n    if (__eqtsOutput[0] !== 0n) symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
+            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput[0] !== 0n) {\n      __eqtsText = new TextDecoder().decode(__eqtsReadOwned(__eqtsOutput));\n    }\n  } finally {\n    if (__eqtsOutput[0] !== 0n) symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
         }
         Runtime::Deno => {
             output.push_str("  const __eqtsOutput = new BigUint64Array(3);\n");
@@ -2333,6 +2344,35 @@ mod tests {
     }
 
     #[test]
+    fn schema_v3_scalar_only_exports_parse() {
+        let functions = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":false,"async_functions":false,"callbacks":false,"traits":false,"streams":false,"iterators":false},"functions":[{"module":"example","name":"add","symbol":"eqts_add","abi":"scalar","kind":{"kind":"function"},"parameters":[{"name":"a","ty":{"kind":"scalar","scalar":"u32"}},{"name":"b","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"}}],"method_sets":[]}"#,
+        )
+        .expect("scalar-only schema v3 metadata must parse");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
+        assert!(matches!(functions[0].kind, ExportKind::Function));
+    }
+
+    #[test]
+    fn bun_loaders_do_not_truncate_pointers_with_number() {
+        let function = owned_function();
+        let bun = render_bun("./libfixture.dylib", std::slice::from_ref(&function));
+        assert!(!bun.contains("Number(__eqtsOutput[0])"));
+        assert!(!bun.contains("Number(output[0])"));
+        assert!(bun.contains("toArrayBuffer(address, 0, Number(length))"));
+        let stream = render_bun(
+            "./libfixture.dylib",
+            std::slice::from_ref(&reactive_function(ExportKind::Stream {
+                item: Type::Owned(OwnedType::String),
+            })),
+        );
+        assert!(!stream.contains("Number(output[0])"));
+        assert!(stream.contains("__eqtsReadOwned(output)"));
+        assert!(stream.contains("symbols.eqts_buffer_free_v1(output[0], output[1], output[2])"));
+    }
+
+    #[test]
     fn schema_v3_explicit_function_exports_parse_with_default_capabilities() {
         let functions = parse_metadata(
             br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"example","name":"add","symbol":"eqts_add","abi":"scalar","kind":{"kind":"function"},"parameters":[{"name":"left","ty":{"kind":"scalar","scalar":"u32"}},{"name":"right","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"}}],"method_sets":[]}"#,
@@ -2737,7 +2777,13 @@ mod tests {
 
         let bun = render_bun("./libfixture.dylib", std::slice::from_ref(&function));
         assert!(bun.contains("new BigUint64Array(3)"));
-        assert!(bun.contains("toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))"));
+        assert!(
+            bun.contains("toArrayBuffer(address, 0, Number(length))"),
+            "{bun}"
+        );
+        assert!(!bun.contains("Number(__eqtsOutput[0])"), "{bun}");
+        assert!(!bun.contains("Number(output[0])"), "{bun}");
+        assert!(bun.contains("__eqtsReadOwned(__eqtsOutput)"));
         assert!(bun.contains(
             "symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2])"
         ));

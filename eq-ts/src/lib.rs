@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use eqts_macros::{
     Enum, Record, async_export, callback, export, iterator, method, methods, object, stream,
@@ -251,10 +251,10 @@ pub struct MethodRegistration {
 inventory::collect!(MethodRegistration);
 
 struct ReactiveEntry {
-    resource: Box<dyn ReactiveResource>,
+    resource: Arc<Mutex<Box<dyn ReactiveResource>>>,
     cancelled: bool,
-    callbacks: std::sync::Arc<Mutex<VecDeque<serde_json::Value>>>,
-    invoke: Option<std::sync::Arc<Mutex<Box<dyn EqtsMethods>>>>,
+    callbacks: Arc<Mutex<VecDeque<serde_json::Value>>>,
+    invoke: Option<Arc<Mutex<Box<dyn EqtsMethods>>>>,
 }
 
 #[derive(Default)]
@@ -273,23 +273,51 @@ fn reactive_registry() -> &'static Mutex<ReactiveRegistry> {
     })
 }
 
-#[must_use]
-pub fn register_reactive(resource: impl ReactiveResource) -> u64 {
-    let mut registry = reactive_registry()
+fn lock_registry() -> std::sync::MutexGuard<'static, ReactiveRegistry> {
+    reactive_registry()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let handle = registry.next;
-    registry.next = registry.next.checked_add(1).unwrap_or(1);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn allocate_handle(registry: &mut ReactiveRegistry) -> u64 {
+    loop {
+        let handle = registry.next;
+        let Some(next) = registry.next.checked_add(1) else {
+            panic!("eqts reactive handle space exhausted");
+        };
+        registry.next = next;
+        if handle != 0 && !registry.entries.contains_key(&handle) {
+            return handle;
+        }
+    }
+}
+
+fn insert_entry(
+    resource: Box<dyn ReactiveResource>,
+    callbacks: Arc<Mutex<VecDeque<serde_json::Value>>>,
+    invoke: Option<Arc<Mutex<Box<dyn EqtsMethods>>>>,
+) -> u64 {
+    let mut registry = lock_registry();
+    let handle = allocate_handle(&mut registry);
     registry.entries.insert(
         handle,
         ReactiveEntry {
-            resource: Box::new(resource),
+            resource: Arc::new(Mutex::new(resource)),
             cancelled: false,
-            callbacks: std::sync::Arc::new(Mutex::new(VecDeque::with_capacity(1))),
-            invoke: None,
+            callbacks,
+            invoke,
         },
     );
     handle
+}
+
+#[must_use]
+pub fn register_reactive(resource: impl ReactiveResource) -> u64 {
+    insert_entry(
+        Box::new(resource),
+        Arc::new(Mutex::new(VecDeque::with_capacity(1))),
+        None,
+    )
 }
 
 struct IdleResource;
@@ -301,21 +329,11 @@ impl ReactiveResource for IdleResource {
 
 #[must_use]
 pub fn register_object(value: impl EqtsMethods) -> u64 {
-    let mut registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let handle = registry.next;
-    registry.next = registry.next.checked_add(1).unwrap_or(1);
-    registry.entries.insert(
-        handle,
-        ReactiveEntry {
-            resource: Box::new(IdleResource),
-            cancelled: false,
-            callbacks: std::sync::Arc::new(Mutex::new(VecDeque::with_capacity(1))),
-            invoke: Some(std::sync::Arc::new(Mutex::new(Box::new(value)))),
-        },
-    );
-    handle
+    insert_entry(
+        Box::new(IdleResource),
+        Arc::new(Mutex::new(VecDeque::with_capacity(1))),
+        Some(Arc::new(Mutex::new(Box::new(value)))),
+    )
 }
 
 #[doc(hidden)]
@@ -324,9 +342,7 @@ pub fn invoke_handle(
     method: &str,
     arguments: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let mut registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut registry = lock_registry();
     let entry = registry
         .entries
         .get_mut(&handle)
@@ -349,9 +365,7 @@ pub fn invoke_handle_async(
     method: &str,
     arguments: Vec<serde_json::Value>,
 ) -> Result<u64, String> {
-    let registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registry = lock_registry();
     let entry = registry
         .entries
         .get(&handle)
@@ -372,26 +386,12 @@ pub fn invoke_handle_async(
 pub fn register_callback<T: EqtsValue>(
     factory: impl FnOnce(Callback<T>) -> Box<dyn ReactiveResource>,
 ) -> u64 {
-    let queue = std::sync::Arc::new(Mutex::new(VecDeque::with_capacity(1)));
+    let queue = Arc::new(Mutex::new(VecDeque::with_capacity(1)));
     let resource = factory(Callback {
-        queue: std::sync::Arc::clone(&queue),
+        queue: Arc::clone(&queue),
         marker: std::marker::PhantomData,
     });
-    let mut registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let handle = registry.next;
-    registry.next = registry.next.checked_add(1).unwrap_or(1);
-    registry.entries.insert(
-        handle,
-        ReactiveEntry {
-            resource,
-            cancelled: false,
-            callbacks: queue,
-            invoke: None,
-        },
-    );
-    handle
+    insert_entry(resource, queue, None)
 }
 
 struct FutureResource {
@@ -419,8 +419,8 @@ where
     T: EqtsValue + Send,
     F: Future<Output = T> + Send + 'static,
 {
-    let state = std::sync::Arc::new(Mutex::new(None));
-    let task_state = std::sync::Arc::clone(&state);
+    let state = Arc::new(Mutex::new(None));
+    let task_state = Arc::clone(&state);
     run_future(async move {
         let value = future.await.into_json();
         *task_state
@@ -442,60 +442,64 @@ fn run_future(future: impl Future<Output = ()> + 'static) {
 
 #[expect(clippy::missing_errors_doc)]
 pub fn enqueue_callback(handle: u64, value: impl EqtsValue) -> Result<(), String> {
-    let mut registry = reactive_registry()
+    let callbacks = {
+        let registry = lock_registry();
+        let entry = registry
+            .entries
+            .get(&handle)
+            .ok_or_else(|| "unknown reactive handle".to_string())?;
+        Arc::clone(&entry.callbacks)
+    };
+    let encoded = value.into_json()?;
+    let mut queue = callbacks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let entry = registry
-        .entries
-        .get_mut(&handle)
-        .ok_or_else(|| "unknown reactive handle".to_string())?;
-    let mut callbacks = entry
-        .callbacks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !callbacks.is_empty() {
+    if !queue.is_empty() {
         return Err("callback buffer is full".into());
     }
-    callbacks.push_back(value.into_json()?);
+    queue.push_back(encoded);
     Ok(())
 }
 
 #[doc(hidden)]
 pub fn cancel_reactive(handle: u64) -> i32 {
-    let mut registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(entry) = registry.entries.get_mut(&handle) else {
-        return ABI_OK;
-    };
-    if !entry.cancelled {
+    let resource = {
+        let mut registry = lock_registry();
+        let Some(entry) = registry.entries.get_mut(&handle) else {
+            return ABI_OK;
+        };
+        if entry.cancelled {
+            return ABI_OK;
+        }
         entry.cancelled = true;
-        entry.resource.cancel();
-    }
+        Arc::clone(&entry.resource)
+    };
+    resource
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .cancel();
     ABI_OK
 }
 
 #[doc(hidden)]
+#[expect(clippy::must_use_candidate)]
 pub fn dispose_reactive(handle: u64) -> i32 {
-    reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entries
-        .remove(&handle);
+    lock_registry().entries.remove(&handle);
     ABI_OK
 }
 
 #[doc(hidden)]
 pub fn poll_reactive(handle: u64) -> Result<(i32, Option<Vec<u8>>), i32> {
-    let mut registry = reactive_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let entry = registry
-        .entries
-        .get_mut(&handle)
-        .ok_or(ABI_UNKNOWN_HANDLE)?;
-    let callback = entry
-        .callbacks
+    let (resource, callbacks, cancelled) = {
+        let registry = lock_registry();
+        let entry = registry.entries.get(&handle).ok_or(ABI_UNKNOWN_HANDLE)?;
+        (
+            Arc::clone(&entry.resource),
+            Arc::clone(&entry.callbacks),
+            entry.cancelled,
+        )
+    };
+    let callback = callbacks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .pop_front();
@@ -504,10 +508,14 @@ pub fn poll_reactive(handle: u64) -> Result<(i32, Option<Vec<u8>>), i32> {
             .map(|value| (ABI_REACTIVE_CALLBACK, Some(value)))
             .map_err(|_| ABI_ENCODE_ERROR);
     }
-    if entry.cancelled {
+    if cancelled {
         return Ok((ABI_REACTIVE_DONE, None));
     }
-    match entry.resource.poll() {
+    let poll = resource
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .poll();
+    match poll {
         Ok(ReactivePoll::Pending) => Ok((ABI_REACTIVE_PENDING, None)),
         Ok(ReactivePoll::Done) => Ok((ABI_REACTIVE_DONE, None)),
         Ok(ReactivePoll::Ready(value)) => serde_json::to_vec(&value)
@@ -518,6 +526,36 @@ pub fn poll_reactive(handle: u64) -> Result<(i32, Option<Vec<u8>>), i32> {
             .map_err(|_| ABI_ENCODE_ERROR),
         Err(error) => Ok((ABI_ENCODE_ERROR, Some(error.into_bytes()))),
     }
+}
+
+fn capabilities_from(functions: &[Function], method_sets: &[MethodSet]) -> Capabilities {
+    let mut capabilities = Capabilities {
+        owned_values: true,
+        objects: false,
+        async_functions: false,
+        callbacks: false,
+        traits: false,
+        streams: false,
+        iterators: false,
+    };
+    for function in functions {
+        match function.kind {
+            ExportKind::Function => {}
+            ExportKind::Object { .. } => capabilities.objects = true,
+            ExportKind::Trait { .. } => capabilities.traits = true,
+            ExportKind::Async { .. } => capabilities.async_functions = true,
+            ExportKind::Callback { .. } => capabilities.callbacks = true,
+            ExportKind::Stream { .. } => capabilities.streams = true,
+            ExportKind::Iterator { .. } => capabilities.iterators = true,
+        }
+    }
+    if method_sets
+        .iter()
+        .any(|set| set.methods.iter().any(|method| method.asynchronous))
+    {
+        capabilities.async_functions = true;
+    }
+    capabilities
 }
 
 macro_rules! scalar_value {
@@ -712,9 +750,10 @@ pub fn metadata_json() -> &'static [u8] {
             .map(|registration| (registration.describe)())
             .collect::<Vec<_>>();
         method_sets.sort_unstable_by_key(|set| set.rust_type);
+        let capabilities = capabilities_from(&functions, &method_sets);
         serde_json::to_vec(&Metadata {
             schema_version: 3,
-            capabilities: Capabilities::default(),
+            capabilities,
             functions,
             method_sets,
         })
@@ -771,76 +810,119 @@ macro_rules! setup {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn eqts_handle_dispose_v1(handle: u64) -> i32 { $crate::dispose_reactive(handle) }
+        pub extern "C" fn eqts_handle_dispose_v1(handle: u64) -> i32 {
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::dispose_reactive(handle))) {
+                Ok(status) => status,
+                Err(_) => $crate::ABI_PANIC,
+            }
+        }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn eqts_reactive_cancel_v1(handle: u64) -> i32 { $crate::cancel_reactive(handle) }
+        pub extern "C" fn eqts_reactive_cancel_v1(handle: u64) -> i32 {
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::cancel_reactive(handle))) {
+                Ok(status) => status,
+                Err(_) => $crate::ABI_PANIC,
+            }
+        }
 
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn eqts_reactive_poll_v1(handle: u64, output: *mut $crate::OwnedBuffer) -> i32 {
             if output.is_null() { return $crate::ABI_NULL_OUTPUT; }
-            match $crate::poll_reactive(handle) {
-                Ok((status, bytes)) => {
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::poll_reactive(handle))) {
+                Ok(Ok((status, bytes))) => {
                     let buffer = bytes.map_or_else($crate::OwnedBuffer::empty, $crate::OwnedBuffer::from_bytes);
                     // SAFETY: caller provides a valid writable output pointer.
                     unsafe { output.write(buffer) };
                     status
                 }
-                Err(status) => status,
+                Ok(Err(status)) => status,
+                Err(_) => $crate::ABI_PANIC,
             }
         }
 
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn eqts_handle_invoke_v1(handle: u64, input: *const u8, len: usize, output: *mut $crate::OwnedBuffer) -> i32 {
             if output.is_null() || (input.is_null() && len != 0) { return $crate::ABI_NULL_OUTPUT; }
-            let input = if len == 0 { &b"{}"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
-            let value: ::eqts::__private::Value = match ::eqts::__private::from_slice(input) { Ok(value) => value, Err(_) => return $crate::ABI_INVALID_INPUT };
-            let Some(method) = value.get("method").and_then(::eqts::__private::Value::as_str) else { return $crate::ABI_INVALID_INPUT; };
-            let arguments = value.get("arguments").and_then(::eqts::__private::Value::as_array).cloned().unwrap_or_default();
-            match $crate::invoke_handle(handle, method, arguments).and_then(|value| ::eqts::__private::to_vec(&value).map_err(|error| error.to_string())) {
-                Ok(bytes) => { unsafe { output.write($crate::OwnedBuffer::from_bytes(bytes)) }; $crate::ABI_OK }
-                Err(error) => { unsafe { output.write($crate::OwnedBuffer::from_bytes(error.into_bytes())) }; $crate::ABI_INVALID_INPUT }
+            let operation = ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<::std::vec::Vec<u8>, (i32, ::std::string::String)> {
+                let input = if len == 0 { &b"{}"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
+                let value: ::eqts::__private::Value = ::eqts::__private::from_slice(input).map_err(|error| ($crate::ABI_INVALID_INPUT, error.to_string()))?;
+                let Some(method) = value.get("method").and_then(::eqts::__private::Value::as_str) else { return Err(($crate::ABI_INVALID_INPUT, "invalid input".into())); };
+                let arguments = value.get("arguments").and_then(::eqts::__private::Value::as_array).cloned().unwrap_or_default();
+                $crate::invoke_handle(handle, method, arguments).and_then(|value| ::eqts::__private::to_vec(&value).map_err(|error| error.to_string())).map_err(|error| ($crate::ABI_INVALID_INPUT, error))
+            }));
+            match operation {
+                Ok(Ok(bytes)) => { unsafe { output.write($crate::OwnedBuffer::from_bytes(bytes)) }; $crate::ABI_OK }
+                Ok(Err((status, error))) => { unsafe { output.write($crate::OwnedBuffer::from_bytes(error.into_bytes())) }; status }
+                Err(_) => { unsafe { output.write($crate::OwnedBuffer::empty()) }; $crate::ABI_PANIC }
             }
         }
 
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn eqts_handle_invoke_async_v1(handle: u64, input: *const u8, len: usize, output: *mut u64) -> i32 {
             if output.is_null() || (input.is_null() && len != 0) { return $crate::ABI_NULL_OUTPUT; }
-            let input = if len == 0 { &b"{}"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
-            let value: ::eqts::__private::Value = match ::eqts::__private::from_slice(input) { Ok(value) => value, Err(_) => return $crate::ABI_INVALID_INPUT };
-            let Some(method) = value.get("method").and_then(::eqts::__private::Value::as_str) else { return $crate::ABI_INVALID_INPUT; };
-            let arguments = value.get("arguments").and_then(::eqts::__private::Value::as_array).cloned().unwrap_or_default();
-            match $crate::invoke_handle_async(handle, method, arguments) { Ok(future) => unsafe { ::eqts::__private::write_output(output, future) }, Err(_) => $crate::ABI_INVALID_INPUT }
+            let operation = ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<u64, i32> {
+                let input = if len == 0 { &b"{}"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
+                let value: ::eqts::__private::Value = ::eqts::__private::from_slice(input).map_err(|_| $crate::ABI_INVALID_INPUT)?;
+                let Some(method) = value.get("method").and_then(::eqts::__private::Value::as_str) else { return Err($crate::ABI_INVALID_INPUT); };
+                let arguments = value.get("arguments").and_then(::eqts::__private::Value::as_array).cloned().unwrap_or_default();
+                $crate::invoke_handle_async(handle, method, arguments).map_err(|_| $crate::ABI_INVALID_INPUT)
+            }));
+            match operation {
+                Ok(Ok(future)) => unsafe { ::eqts::__private::write_output(output, future) },
+                Ok(Err(status)) => status,
+                Err(_) => $crate::ABI_PANIC,
+            }
         }
 
         #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
         #[::eqts::napi_derive::napi(js_name = "eqtsHandleInvoke")]
         pub fn __eqts_napi_handle_invoke(handle: ::eqts::napi::bindgen_prelude::BigInt, method: String, arguments: Vec<::eqts::__private::Value>) -> ::eqts::napi::Result<::eqts::__private::Value> {
             let (_, handle, lossless) = handle.get_u64(); if !lossless { return Err(::eqts::napi::Error::from_reason("handle out of range")); }
-            $crate::invoke_handle(handle, &method, arguments).map_err(::eqts::napi::Error::from_reason)
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::invoke_handle(handle, &method, arguments))) {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(error)) => Err(::eqts::napi::Error::from_reason(error)),
+                Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+            }
         }
 
         #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
         #[::eqts::napi_derive::napi(js_name = "eqtsHandleInvokeAsync")]
         pub fn __eqts_napi_handle_invoke_async(handle: ::eqts::napi::bindgen_prelude::BigInt, method: String, arguments: Vec<::eqts::__private::Value>) -> ::eqts::napi::Result<::eqts::napi::bindgen_prelude::BigInt> {
             let (_, handle, lossless) = handle.get_u64(); if !lossless { return Err(::eqts::napi::Error::from_reason("handle out of range")); }
-            $crate::invoke_handle_async(handle, &method, arguments).map(Into::into).map_err(::eqts::napi::Error::from_reason)
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::invoke_handle_async(handle, &method, arguments))) {
+                Ok(Ok(future)) => Ok(future.into()),
+                Ok(Err(error)) => Err(::eqts::napi::Error::from_reason(error)),
+                Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+            }
         }
 
         #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
         #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = "eqtsHandleInvoke")]
         pub fn __eqts_wasm_handle_invoke(handle: u64, method: String, arguments: ::eqts::wasm_bindgen::JsValue) -> Result<::eqts::wasm_bindgen::JsValue, ::eqts::wasm_bindgen::JsValue> {
-            let arguments = ::eqts::serde_wasm_bindgen::from_value(arguments).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()))?;
-            let value = $crate::invoke_handle(handle, &method, arguments).map_err(|error| ::eqts::js_sys::Error::new(&error))?;
-            let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-            ::eqts::serde::Serialize::serialize(&value, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> Result<_, String> {
+                let arguments = ::eqts::serde_wasm_bindgen::from_value(arguments).map_err(|error| error.to_string())?;
+                $crate::invoke_handle(handle, &method, arguments)
+            })) {
+                Ok(Ok(value)) => {
+                    let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                    ::eqts::serde::Serialize::serialize(&value, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+                }
+                Ok(Err(error)) => Err(::eqts::js_sys::Error::new(&error).into()),
+                Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+            }
         }
 
         #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
         #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = "eqtsHandleInvokeAsync")]
         pub fn __eqts_wasm_handle_invoke_async(handle: u64, method: String, arguments: ::eqts::wasm_bindgen::JsValue) -> Result<u64, ::eqts::wasm_bindgen::JsValue> {
-            let arguments = ::eqts::serde_wasm_bindgen::from_value(arguments).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()))?;
-            $crate::invoke_handle_async(handle, &method, arguments).map_err(|error| ::eqts::js_sys::Error::new(&error).into())
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> Result<_, String> {
+                let arguments = ::eqts::serde_wasm_bindgen::from_value(arguments).map_err(|error| error.to_string())?;
+                $crate::invoke_handle_async(handle, &method, arguments)
+            })) {
+                Ok(Ok(future)) => Ok(future),
+                Ok(Err(error)) => Err(::eqts::js_sys::Error::new(&error).into()),
+                Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+            }
         }
 
         #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
@@ -865,9 +947,14 @@ macro_rules! setup {
         pub fn __eqts_napi_reactive_poll(handle: ::eqts::napi::bindgen_prelude::BigInt) -> ::eqts::napi::Result<::eqts::__private::Value> {
             let (_, handle, lossless) = handle.get_u64();
             if !lossless { return Err(::eqts::napi::Error::from_reason("reactive handle is out of range")); }
-            let (status, bytes) = $crate::poll_reactive(handle).map_err(|_| ::eqts::napi::Error::from_reason("unknown reactive handle"))?;
-            let value = bytes.map(|bytes| ::eqts::__private::from_slice(&bytes)).transpose().map_err(|error| ::eqts::napi::Error::from_reason(error.to_string()))?;
-            Ok(::eqts::serde::Serialize::serialize(&$crate::ReactiveJsPoll { status, value }, ::eqts::serde_json::value::Serializer).expect("JSON value serialization cannot fail"))
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::poll_reactive(handle))) {
+                Ok(Ok((status, bytes))) => {
+                    let value = bytes.map(|bytes| ::eqts::__private::from_slice(&bytes)).transpose().map_err(|error| ::eqts::napi::Error::from_reason(error.to_string()))?;
+                    Ok(::eqts::serde::Serialize::serialize(&$crate::ReactiveJsPoll { status, value }, ::eqts::serde_json::value::Serializer).expect("JSON value serialization cannot fail"))
+                }
+                Ok(Err(_)) => Err(::eqts::napi::Error::from_reason("unknown reactive handle")),
+                Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+            }
         }
 
         #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
@@ -883,10 +970,15 @@ macro_rules! setup {
         #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
         #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = "eqtsReactivePoll")]
         pub fn __eqts_wasm_reactive_poll(handle: u64) -> Result<::eqts::wasm_bindgen::JsValue, ::eqts::wasm_bindgen::JsValue> {
-            let (status, bytes) = $crate::poll_reactive(handle).map_err(|_| ::eqts::js_sys::Error::new("unknown reactive handle"))?;
-            let value = bytes.map(|bytes| ::eqts::__private::from_slice(&bytes)).transpose().map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()))?;
-            let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-            ::eqts::serde::Serialize::serialize(&$crate::ReactiveJsPoll { status, value }, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| $crate::poll_reactive(handle))) {
+                Ok(Ok((status, bytes))) => {
+                    let value = bytes.map(|bytes| ::eqts::__private::from_slice(&bytes)).transpose().map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()))?;
+                    let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                    ::eqts::serde::Serialize::serialize(&$crate::ReactiveJsPoll { status, value }, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+                }
+                Ok(Err(_)) => Err(::eqts::js_sys::Error::new("unknown reactive handle").into()),
+                Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+            }
         }
     };
 }
@@ -901,8 +993,39 @@ mod tests {
             serde_json::from_slice(metadata_json()).expect("metadata must be valid JSON");
         assert_eq!(metadata["schema_version"], 3);
         assert_eq!(metadata["capabilities"]["owned_values"], true);
-        assert_eq!(metadata["capabilities"]["async_functions"], true);
+        assert_eq!(metadata["capabilities"]["async_functions"], false);
+        assert_eq!(metadata["capabilities"]["objects"], false);
+        assert_eq!(metadata["capabilities"]["callbacks"], false);
+        assert_eq!(metadata["capabilities"]["traits"], false);
+        assert_eq!(metadata["capabilities"]["streams"], false);
+        assert_eq!(metadata["capabilities"]["iterators"], false);
         assert_eq!(metadata["functions"], serde_json::json!([]));
+    }
+
+    fn dummy_entry() -> ReactiveEntry {
+        ReactiveEntry {
+            resource: Arc::new(Mutex::new(Box::new(IdleResource))),
+            cancelled: false,
+            callbacks: Arc::new(Mutex::new(VecDeque::new())),
+            invoke: None,
+        }
+    }
+
+    #[test]
+    fn handle_ids_skip_live_entries_and_do_not_wrap() {
+        let mut registry = ReactiveRegistry {
+            next: 1,
+            entries: HashMap::new(),
+        };
+        registry.entries.insert(1, dummy_entry());
+        registry.entries.insert(2, dummy_entry());
+        registry.next = 1;
+        assert_eq!(allocate_handle(&mut registry), 3);
+        registry.next = u64::MAX;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            allocate_handle(&mut registry);
+        }));
+        assert!(panicked.is_err());
     }
 
     #[test]

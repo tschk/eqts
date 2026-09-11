@@ -249,16 +249,37 @@ fn expand_reactive(
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn #wrapper(input: *const u8, len: usize, output: *mut u64) -> i32 {
             if output.is_null() || (input.is_null() && len != 0) { return ::eqts::ABI_NULL_OUTPUT; }
-            let input = if len == 0 { &b"[]"[..] } else { unsafe { std::slice::from_raw_parts(input, len) } };
-            let values = match ::eqts::__private::from_slice(input) { Ok(values) => values, Err(_) => return ::eqts::ABI_INVALID_INPUT };
-            match #construct(values) { Ok(handle) => unsafe { ::eqts::__private::write_output(output, handle) }, Err(_) => ::eqts::ABI_INVALID_INPUT }
+            let operation = ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<u64, i32> {
+                let input = if len == 0 { &b"[]"[..] } else { unsafe { ::std::slice::from_raw_parts(input, len) } };
+                let values = ::eqts::__private::from_slice(input).map_err(|_| ::eqts::ABI_INVALID_INPUT)?;
+                #construct(values).map_err(|_| ::eqts::ABI_INVALID_INPUT)
+            }));
+            match operation {
+                Ok(Ok(handle)) => unsafe { ::eqts::__private::write_output(output, handle) },
+                Ok(Err(status)) => status,
+                Err(_) => ::eqts::ABI_PANIC,
+            }
         }
         #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
         #[::eqts::napi_derive::napi(js_name = #js_name)]
-        fn #napi(#(#napi_inputs),*) -> ::eqts::napi::Result<::eqts::napi::bindgen_prelude::BigInt> { #construct(vec![#(#napi_values),*]).map(Into::into).map_err(::eqts::napi::Error::from_reason) }
+        fn #napi(#(#napi_inputs),*) -> ::eqts::napi::Result<::eqts::napi::bindgen_prelude::BigInt> {
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| #construct(vec![#(#napi_values),*]))) {
+                Ok(Ok(handle)) => Ok(handle.into()),
+                Ok(Err(error)) => Err(::eqts::napi::Error::from_reason(error)),
+                Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+            }
+        }
         #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
         #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
-        pub fn #wasm(#(#wasm_inputs),*) -> Result<u64, ::eqts::wasm_bindgen::JsValue> { let values = (|| -> Result<_, String> { Ok(vec![#(#wasm_values),*]) })().map_err(|error| ::eqts::js_sys::Error::new(&error))?; #construct(values).map_err(|error| ::eqts::js_sys::Error::new(&error).into()) }
+        pub fn #wasm(#(#wasm_inputs),*) -> Result<u64, ::eqts::wasm_bindgen::JsValue> {
+            match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> Result<_, String> {
+                Ok(#construct(vec![#(#wasm_values),*])?)
+            })) {
+                Ok(Ok(handle)) => Ok(handle),
+                Ok(Err(error)) => Err(::eqts::js_sys::Error::new(&error).into()),
+                Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+            }
+        }
         ::eqts::inventory::submit! { ::eqts::FunctionRegistration { describe: || ::eqts::Function {
             module: module_path!(), name: stringify!(#name), symbol: stringify!(#wrapper), abi: ::eqts::Abi::Json,
             parameters: vec![#(#parameters),*], result: ::eqts::Type::Scalar { scalar: ::eqts::Scalar::U64 }, kind: #kind_value
@@ -362,7 +383,6 @@ fn expand_scalar(
         .iter()
         .map(|argument| plain_ident(argument).expect("validated parameter"))
         .collect::<Vec<_>>();
-    let direct_output = &function.sig.output;
     let rust_result_ty = match &function.sig.output {
         ReturnType::Default => quote!(()),
         ReturnType::Type(_, ty) => quote!(#ty),
@@ -372,10 +392,10 @@ fn expand_scalar(
     } else {
         quote!(-> ::eqts::napi::Result<#rust_result_ty>)
     };
-    let napi_call = if result.is_64_bit() {
-        quote!(Ok(#name(#(#direct_calls),*).into()))
+    let napi_ok = if result.is_64_bit() {
+        quote!(Ok(value.into()))
     } else {
-        quote!(Ok(#name(#(#direct_calls),*)))
+        quote!(Ok(value))
     };
     let (output, invoke) = if matches!(result, TypeKind::Void) {
         (
@@ -404,11 +424,22 @@ fn expand_scalar(
         &quote! {
             #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
             #[::eqts::napi_derive::napi(js_name = #js_name)]
-            fn #napi_bridge(#(#napi_inputs),*) #napi_output { #(#napi_conversions)* #napi_call }
+            fn #napi_bridge(#(#napi_inputs),*) #napi_output {
+                #(#napi_conversions)*
+                match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| #name(#(#direct_calls),*))) {
+                    Ok(value) => #napi_ok,
+                    Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+                }
+            }
 
             #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
             #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
-            pub fn #wasm_bridge(#(#direct_inputs),*) #direct_output { #name(#(#direct_calls),*) }
+            pub fn #wasm_bridge(#(#direct_inputs),*) -> ::std::result::Result<#rust_result_ty, ::eqts::wasm_bindgen::JsValue> {
+                match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| #name(#(#direct_calls),*))) {
+                    Ok(value) => Ok(value),
+                    Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+                }
+            }
 
             #[unsafe(no_mangle)]
             #[doc = "# Safety"]

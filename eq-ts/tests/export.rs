@@ -33,6 +33,13 @@ fn metadata_is_versioned_and_sorted() {
     let metadata: serde_json::Value =
         serde_json::from_slice(eqts::metadata_json()).expect("metadata must be valid JSON");
     assert_eq!(metadata["schema_version"], 3);
+    assert_eq!(metadata["capabilities"]["owned_values"], true);
+    assert_eq!(metadata["capabilities"]["objects"], false);
+    assert_eq!(metadata["capabilities"]["async_functions"], false);
+    assert_eq!(metadata["capabilities"]["callbacks"], false);
+    assert_eq!(metadata["capabilities"]["traits"], false);
+    assert_eq!(metadata["capabilities"]["streams"], false);
+    assert_eq!(metadata["capabilities"]["iterators"], false);
     assert_eq!(metadata["functions"][0]["name"], "add");
     assert_eq!(metadata["functions"][1]["name"], "invert");
 }

@@ -515,18 +515,26 @@ fn expand_json(
             #[cfg(all(feature = "node-napi", not(feature = "wasm")))]
             #[::eqts::napi_derive::napi(js_name = #js_name)]
             fn #napi_bridge(#(#napi_inputs),*) -> ::eqts::napi::Result<::eqts::__private::Value> {
-                let value = #bridge(vec![#(#napi_values),*]).and_then(#transport);
-                value.map_err(::eqts::napi::Error::from_reason)
+                match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| #bridge(vec![#(#napi_values),*]).and_then(#transport))) {
+                    Ok(value) => value.map_err(::eqts::napi::Error::from_reason),
+                    Err(_) => Err(::eqts::napi::Error::from_reason("eqts panic")),
+                }
             }
 
             #[cfg(all(feature = "wasm", not(feature = "node-napi")))]
             #[::eqts::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
             pub fn #wasm_bridge(#(#wasm_inputs),*) -> ::std::result::Result<::eqts::wasm_bindgen::JsValue, ::eqts::wasm_bindgen::JsValue> {
-                let values = (|| -> ::std::result::Result<_, ::std::string::String> { Ok(vec![#(#wasm_values),*]) })()
-                    .map_err(|error| ::eqts::js_sys::Error::new(&error))?;
-                let value = #bridge(values).and_then(#transport).map_err(|error| ::eqts::js_sys::Error::new(&error))?;
-                let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                ::eqts::serde::Serialize::serialize(&value, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+                match ::eqts::__private::catch_unwind(::eqts::__private::AssertUnwindSafe(|| -> ::std::result::Result<_, ::std::string::String> {
+                    let values = vec![#(#wasm_values),*];
+                    #bridge(values).and_then(#transport)
+                })) {
+                    Ok(Ok(value)) => {
+                        let serializer = ::eqts::serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                        ::eqts::serde::Serialize::serialize(&value, &serializer).map_err(|error| ::eqts::js_sys::Error::new(&error.to_string()).into())
+                    }
+                    Ok(Err(error)) => Err(::eqts::js_sys::Error::new(&error).into()),
+                    Err(_) => Err(::eqts::js_sys::Error::new("eqts panic").into()),
+                }
             }
 
             #[unsafe(no_mangle)]

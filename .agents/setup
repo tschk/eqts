@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+step() {
+  local name="$1"
+  shift
+  echo "==> $name"
+  local start
+  start="$(date +%s)"
+  "$@"
+  echo "==> $name done in $(($(date +%s) - start))s"
+}
+
+need_pkg() {
+  dpkg -s "$1" >/dev/null 2>&1
+}
+
+packages=()
+for pkg in build-essential pkg-config curl ca-certificates; do
+  if ! need_pkg "$pkg"; then
+    packages+=("$pkg")
+  fi
+done
+if ((${#packages[@]})); then
+  step "apt-get update" sudo apt-get update
+  step "apt-get install" sudo apt-get install -y "${packages[@]}"
+fi
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:${HOME}/.bun/bin:$PATH"
+
+RUST_TOOLCHAIN="1.88.0"
+if ! command -v rustup >/dev/null 2>&1; then
+  step "install rustup" bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain '$RUST_TOOLCHAIN' --profile minimal"
+fi
+
+# The installer cannot update this running script's environment.
+# shellcheck disable=SC1091
+source "$CARGO_HOME/env"
+
+if ! rustup toolchain list | grep -F "$RUST_TOOLCHAIN" >/dev/null; then
+  step "install rust $RUST_TOOLCHAIN" rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+fi
+step "default rust" rustup default "$RUST_TOOLCHAIN"
+step "rust components" rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"
+
+if ! command -v bun >/dev/null 2>&1; then
+  step "install bun" bash -c "curl -fsSL https://bun.sh/install | bash"
+  export PATH="$HOME/.bun/bin:$PATH"
+fi
+
+profile_marker="# eqts rustup environment"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<EOF
+
+$profile_marker
+export CARGO_HOME="\${CARGO_HOME:-\$HOME/.cargo}"
+export RUSTUP_HOME="\${RUSTUP_HOME:-\$HOME/.rustup}"
+if [ -f "\$CARGO_HOME/env" ]; then
+  # shellcheck disable=SC1091
+  . "\$CARGO_HOME/env"
+fi
+export PATH="\$CARGO_HOME/bin:\$HOME/.bun/bin:\$PATH"
+EOF
+fi
+
+step "cargo fetch" cargo fetch --locked
+if [[ -f examples/add/bun.lock ]]; then
+  step "bun install examples/add" bun install --frozen-lockfile --cwd examples/add
+fi
+
+echo "==> rustc $(rustc --version)"
+echo "==> cargo $(cargo --version)"
+echo "==> bun $(bun --version)"

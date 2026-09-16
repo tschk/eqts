@@ -569,7 +569,7 @@ fn render_bridge_loader(runtime: BridgeRuntime, functions: &[Function]) -> Strin
 }
 
 fn reactive_runtime() -> &'static str {
-    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  try {\n    const iterator = __eqtsHandle(handle, decode);\n    const result = await iterator.next();\n    iterator.dispose();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
+    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } catch (error) { resource.dispose(); throw error; } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  const iterator = __eqtsHandle(handle, decode);\n  try {\n    const result = await iterator.next();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { iterator.dispose(); signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
 }
 
 fn render_reactive_function(output: &mut String, function: &Function) {
@@ -1603,10 +1603,17 @@ fn render_bun(path: &str, functions: &[Function]) -> String {
     }
     output.push_str("});\n\n");
     output.push_str(js_helpers());
+    if functions
+        .iter()
+        .any(|function| function.abi == FunctionAbi::Json)
+        || reactive
+    {
+        output.push_str(bun_owned_buffer_helper());
+    }
     output.push('\n');
     if reactive {
-        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, ptr(output)); let value = null; try { if (output[0] !== 0n) value = JSON.parse(new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice())); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
-        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); let text = \"\"; try { if (output[0] !== 0n) text = new TextDecoder().decode(new Uint8Array(toArrayBuffer(Number(output[0]), 0, Number(output[1]))).slice()); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
+        output.push_str("const bindings = {\n  eqtsHandleDispose(handle) { symbols.eqts_handle_dispose_v1(handle); },\n  eqtsReactiveCancel(handle) { const status = symbols.eqts_reactive_cancel_v1(handle); if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); },\n  eqtsReactivePoll(handle) { const output = new BigUint64Array(3); const status = symbols.eqts_reactive_poll_v1(handle, ptr(output)); let value = null; try { if (output[0] !== 0n) value = JSON.parse(new TextDecoder().decode(__eqtsReadOwned(output))); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } if (status === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", handle); return { status, value }; },\n};\n\n");
+        output.push_str("bindings.eqtsHandleInvoke = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(3); const status = symbols.eqts_handle_invoke_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); let text = \"\"; try { if (output[0] !== 0n) text = new TextDecoder().decode(__eqtsReadOwned(output)); } finally { if (output[0] !== 0n) symbols.eqts_buffer_free_v1(output[0], output[1], output[2]); } checkStatus(status, method, text); return JSON.parse(text); };\n\n");
         output.push_str("bindings.eqtsHandleInvokeAsync = (handle, method, __eqtsArguments) => { const input = new TextEncoder().encode(JSON.stringify({ method, arguments: __eqtsArguments })); const output = new BigUint64Array(1); const status = symbols.eqts_handle_invoke_async_v1(handle, ptr(input), BigInt(input.byteLength), ptr(output)); checkStatus(status, method); return output[0]; };\n\n");
         output.push_str(reactive_runtime());
     }
@@ -1705,6 +1712,10 @@ fn js_helpers() -> &'static str {
     "export class EqtsError extends Error {\n  constructor(code, value) {\n    super(typeof value === \"string\" ? value : `eqts error: ${code}`);\n    this.name = \"EqtsError\";\n    this.code = code;\n    this.value = value;\n  }\n}\n\nfunction __eqtsNormalize(value) {\n  if (value instanceof Map) return Object.fromEntries(Array.from(value, ([key, entry]) => [key, __eqtsNormalize(entry)]));\n  if (Array.isArray(value)) return value.map(__eqtsNormalize);\n  return value;\n}\n\nfunction checkStatus(status, name, detail) {\n  if (status === 0) return;\n  const code = { 1: \"RUST_PANIC\", 2: \"NULL_OUTPUT\", 3: \"INVALID_INPUT\", 4: \"ENCODE_FAILURE\" }[status] ?? \"ABI_ERROR\";\n  throw new EqtsError(code, detail || `eqts call ${name} failed with ABI status ${status}`);\n}\n"
 }
 
+fn bun_owned_buffer_helper() -> &'static str {
+    "function __eqtsReadOwned(output) {\n  const address = output[0];\n  const length = output[1];\n  if (address === 0n || length === 0n) return new Uint8Array();\n  if (length > 2147483647n) throw new EqtsError(\"ENCODE_FAILURE\", \"owned buffer length exceeds JavaScript limits\");\n  const pointer = Number(address);\n  if (BigInt(pointer) !== address) throw new EqtsError(\"ENCODE_FAILURE\", \"owned buffer pointer exceeds JavaScript number range\");\n  return new Uint8Array(toArrayBuffer(pointer, 0, Number(length))).slice();\n}\n"
+}
+
 fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtime) {
     let parameters = function
         .parameters
@@ -1748,7 +1759,7 @@ fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtim
                 function.symbol
             )
             .expect("writing to a string cannot fail");
-            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput[0] !== 0n) {\n      const __eqtsBytes = new Uint8Array(toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))).slice();\n      __eqtsText = new TextDecoder().decode(__eqtsBytes);\n    }\n  } finally {\n    if (__eqtsOutput[0] !== 0n) symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
+            output.push_str("  let __eqtsText = \"\";\n  try {\n    if (__eqtsOutput[0] !== 0n) {\n      __eqtsText = new TextDecoder().decode(__eqtsReadOwned(__eqtsOutput));\n    }\n  } finally {\n    if (__eqtsOutput[0] !== 0n) symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2]);\n  }\n");
         }
         Runtime::Deno => {
             output.push_str("  const __eqtsOutput = new BigUint64Array(3);\n");
@@ -2333,6 +2344,36 @@ mod tests {
     }
 
     #[test]
+    fn schema_v3_scalar_only_exports_parse() {
+        let functions = parse_metadata(
+            br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":false,"async_functions":false,"callbacks":false,"traits":false,"streams":false,"iterators":false},"functions":[{"module":"example","name":"add","symbol":"eqts_add","abi":"scalar","kind":{"kind":"function"},"parameters":[{"name":"a","ty":{"kind":"scalar","scalar":"u32"}},{"name":"b","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"}}],"method_sets":[]}"#,
+        )
+        .expect("scalar-only schema v3 metadata must parse");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
+        assert!(matches!(functions[0].kind, ExportKind::Function));
+    }
+
+    #[test]
+    fn bun_loaders_do_not_truncate_pointers_with_number() {
+        let function = owned_function();
+        let bun = render_bun("./libfixture.dylib", std::slice::from_ref(&function));
+        assert!(!bun.contains("Number(__eqtsOutput[0])"));
+        assert!(!bun.contains("Number(output[0])"));
+        assert!(bun.contains("toArrayBuffer(pointer, 0, Number(length))"));
+        assert!(bun.contains("BigInt(pointer) !== address"));
+        let stream = render_bun(
+            "./libfixture.dylib",
+            std::slice::from_ref(&reactive_function(ExportKind::Stream {
+                item: Type::Owned(OwnedType::String),
+            })),
+        );
+        assert!(!stream.contains("Number(output[0])"));
+        assert!(stream.contains("__eqtsReadOwned(output)"));
+        assert!(stream.contains("symbols.eqts_buffer_free_v1(output[0], output[1], output[2])"));
+    }
+
+    #[test]
     fn schema_v3_explicit_function_exports_parse_with_default_capabilities() {
         let functions = parse_metadata(
             br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"example","name":"add","symbol":"eqts_add","abi":"scalar","kind":{"kind":"function"},"parameters":[{"name":"left","ty":{"kind":"scalar","scalar":"u32"}},{"name":"right","ty":{"kind":"scalar","scalar":"u32"}}],"result":{"kind":"scalar","scalar":"u32"}}],"method_sets":[]}"#,
@@ -2532,6 +2573,64 @@ mod tests {
         assert!(loader.contains("signal?.aborted"));
         assert!(loader.contains("bindings.eqtsReactiveCancel(handle)"));
         assert!(loader.contains("removeEventListener"));
+    }
+
+    #[test]
+    fn reactive_async_disposes_handle_when_polling_fails() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let function = reactive_function(ExportKind::Async {
+            value: Type::Owned(OwnedType::String),
+        });
+        fs::write(
+            temporary.path().join("bindings.js"),
+            "export let disposals = 0; export function events() { return 7n; } export function eqtsReactivePoll() { return { status: 99, value: null }; } export function eqtsReactiveCancel() {} export function eqtsHandleDispose() { disposals++; }",
+        )
+        .expect("write bindings");
+        fs::write(
+            temporary.path().join("index.js"),
+            render_bridge_loader(BridgeRuntime::NodeNapi, &[function]),
+        )
+        .expect("write loader");
+        fs::write(
+            temporary.path().join("test.js"),
+            "import { events } from './index.js'; import { disposals } from './bindings.js'; let rejected = false; try { await events(); } catch (error) { rejected = error.code === 'REACTIVE_POLL'; } if (!rejected || disposals !== 1) throw new Error(`cleanup failure: ${rejected} ${disposals}`);",
+        )
+        .expect("write test");
+        let status = Command::new("bun")
+            .arg("test.js")
+            .current_dir(temporary.path())
+            .status()
+            .expect("Bun must be installed for generated JavaScript tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn reactive_stream_disposes_handle_when_polling_fails() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let function = reactive_function(ExportKind::Stream {
+            item: Type::Owned(OwnedType::String),
+        });
+        fs::write(
+            temporary.path().join("bindings.js"),
+            "export let disposals = 0; export function events() { return 7n; } export function eqtsReactivePoll() { return { status: 99, value: null }; } export function eqtsReactiveCancel() {} export function eqtsHandleDispose() { disposals++; }",
+        )
+        .expect("write bindings");
+        fs::write(
+            temporary.path().join("index.js"),
+            render_bridge_loader(BridgeRuntime::NodeNapi, &[function]),
+        )
+        .expect("write loader");
+        fs::write(
+            temporary.path().join("test.js"),
+            "import { events } from './index.js'; import { disposals } from './bindings.js'; const stream = events(); let rejected = false; try { await stream.next(); } catch (error) { rejected = error.code === 'REACTIVE_POLL'; } if (!rejected || !stream.disposed || disposals !== 1) throw new Error(`cleanup failure: ${rejected} ${stream.disposed} ${disposals}`);",
+        )
+        .expect("write test");
+        let status = Command::new("bun")
+            .arg("test.js")
+            .current_dir(temporary.path())
+            .status()
+            .expect("Bun must be installed for generated JavaScript tests");
+        assert!(status.success());
     }
 
     #[test]
@@ -2737,7 +2836,14 @@ mod tests {
 
         let bun = render_bun("./libfixture.dylib", std::slice::from_ref(&function));
         assert!(bun.contains("new BigUint64Array(3)"));
-        assert!(bun.contains("toArrayBuffer(Number(__eqtsOutput[0]), 0, Number(__eqtsOutput[1]))"));
+        assert!(
+            bun.contains("toArrayBuffer(pointer, 0, Number(length))"),
+            "{bun}"
+        );
+        assert!(bun.contains("BigInt(pointer) !== address"), "{bun}");
+        assert!(!bun.contains("Number(__eqtsOutput[0])"), "{bun}");
+        assert!(!bun.contains("Number(output[0])"), "{bun}");
+        assert!(bun.contains("__eqtsReadOwned(__eqtsOutput)"));
         assert!(bun.contains(
             "symbols.eqts_buffer_free_v1(__eqtsOutput[0], __eqtsOutput[1], __eqtsOutput[2])"
         ));

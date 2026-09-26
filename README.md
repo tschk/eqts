@@ -72,6 +72,8 @@ The target covers synchronous functions, streams, and iterators, and rejects any
 - scriptc has no pointer parameters or owned pointer returns, so the generated bridge delivers every result through a call-scoped callback and carries `u64` handles as a high/low `u32` pair.
 - The generated `index.ts` cannot run under Node, Bun, or Deno: its `declare function` declarations emit no JavaScript. Use `--target node-napi`, `--target bun`, `--target deno`, `--target node-koffi`, or `--target wasm` for those runtimes.
 
+Verified against scriptc 0.1.4 and 0.1.5, which ship a byte-identical FFI surface (`packages/compiler/src/ffi/`); the CI job pins 0.1.4.
+
 The build needs a static library, so the crate's `[lib] crate-type` must include `staticlib`, and it needs a C compiler on `PATH` (or `CC`) to compile the bridge. `--target all` does not include `scriptc`, and the target is not yet supported on Windows.
 
 Native owned values use a versioned JSON ABI with explicit buffer ownership. Rust `Result` errors become `EqtsError`; 64-bit integers become TypeScript `bigint`; bytes become `Uint8Array`. Generated TypeScript function names use camel case while Rust symbols remain snake case.

@@ -90,7 +90,11 @@ jobs:
         with:
           node-version: 24
       - run: sudo apt-get update && sudo apt-get install -y clang
-      - run: npm install --global scriptc@0.1.5
+      - run: npm install --global scriptc@0.1.4
+      # scriptc 0.1.2 through 0.1.4 publish @scriptc/llvm-*/bin/scriptc-llvm-codegen
+      # without the executable bit, so `scriptc build` fails with SC3003. 0.1.5
+      # fixed the packaging; this chmod is the cost of pinning the older release.
+      - run: chmod +x "$(npm root -g)"/scriptc/node_modules/@scriptc/llvm-*/bin/scriptc-llvm-codegen
       - run: cargo install --path cargo-eqts --locked --debug
       - working-directory: examples/scriptc
         run: cargo eqts build --target scriptc --release

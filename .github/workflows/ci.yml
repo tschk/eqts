@@ -78,6 +78,35 @@ jobs:
       - run: zig cc -target x86_64-linux-musl -shared -Wl,--whole-archive examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.a -Wl,--no-whole-archive -lunwind -o examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so
       - run: nm -g examples/add/target/x86_64-unknown-linux-musl/release/libeqts_example_add.so | grep ' T eqts_metadata_v1'
 
+  scriptc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: npm install --global scriptc@0.1.5
+      - run: cargo install --path cargo-eqts --locked --debug
+      - working-directory: examples/scriptc
+        run: cargo eqts build --target scriptc --release
+      - working-directory: examples/scriptc
+        run: scriptc coverage app.ts
+      - working-directory: examples/scriptc
+        run: scriptc build app.ts --ffi dist/scriptc/ffi.json -o dist/scriptc/app
+      - working-directory: examples/scriptc
+        run: |
+          ./dist/scriptc/app > /tmp/scriptc-app.log
+          grep -q '^add: 42$' /tmp/scriptc-app.log
+          grep -q '^reverseBytes: 3 3$' /tmp/scriptc-app.log
+          grep -q '^people: Ada 36$' /tmp/scriptc-app.log
+          grep -q '^checkedDivide error: RUST_ERROR division by zero$' /tmp/scriptc-app.log
+          grep -q '^done$' /tmp/scriptc-app.log
+
   parity-and-package:
     runs-on: macos-14
     steps:

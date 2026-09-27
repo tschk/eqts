@@ -21,6 +21,20 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+      - name: Dependency skew guard (single convert_case per manifest)
+        run: |
+          fail=0
+          for manifest in Cargo.toml examples/add/Cargo.toml examples/backend-parity/node-napi/Cargo.toml; do
+            versions="$(cargo tree --manifest-path "$manifest" --all-features --edges normal --prefix none \
+              | grep -oE 'convert_case v[0-9]+\.[0-9]+\.[0-9]+' | sort -u || true)"
+            count="$(printf '%s' "$versions" | grep -c . || true)"
+            echo "$manifest: ${versions:-none}"
+            if [ "$count" != "1" ]; then
+              echo "::error::$manifest resolves more than one convert_case version; the napi-derive <-> napi-derive-backend Case type skew (E0308 x9) will follow"
+              fail=1
+            fi
+          done
+          exit $fail
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked

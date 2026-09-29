@@ -1,0 +1,23 @@
+[package]
+name = "eqts-example-scriptc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+eqts = { path = "../../eq-ts", default-features = false }
+
+# Declared so the shared eqts macros' transport cfgs are known to this crate.
+# The scriptc target builds with `--no-default-features` and needs none of them.
+[features]
+default = []
+node-napi = ["eqts/node-napi"]
+node-koffi = ["eqts/node-koffi"]
+bun = ["eqts/bun"]
+deno = ["eqts/deno"]
+wasm = ["eqts/wasm"]
+
+[workspace]

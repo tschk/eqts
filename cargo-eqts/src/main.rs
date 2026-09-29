@@ -9,6 +9,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::json;
 
+mod scriptc;
+
+/// The generated shim object linked beside the crate's static library.
+const SHIM_OBJECT: &str = "eqts_shim.o";
+
 #[derive(Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
 struct Cli {
@@ -37,18 +42,19 @@ enum EqtsCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum Target {
+pub(crate) enum Target {
     NodeKoffi,
     Bun,
     Deno,
     NodeNapi,
     Wasm,
     WasmBrowser,
+    Scriptc,
     All,
 }
 
 #[derive(Clone, Debug)]
-struct Function {
+pub(crate) struct Function {
     module: String,
     name: String,
     symbol: String,
@@ -165,7 +171,7 @@ impl<'de> Deserialize<'de> for Function {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-enum ExportKind {
+pub(crate) enum ExportKind {
     #[default]
     Function,
     Object {
@@ -233,14 +239,14 @@ struct Parameter {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
-enum FunctionAbi {
+pub(crate) enum FunctionAbi {
     #[default]
     Scalar,
     Json,
 }
 
 #[derive(Clone, Debug)]
-enum Type {
+pub(crate) enum Type {
     Scalar(Scalar),
     Owned(OwnedType),
 }
@@ -289,7 +295,7 @@ impl<'de> Deserialize<'de> for Type {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[serde(deny_unknown_fields)]
-enum OwnedType {
+pub(crate) enum OwnedType {
     String,
     Bytes,
     Vec { value: Box<Type> },
@@ -308,7 +314,7 @@ struct Field {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Scalar {
+pub(crate) enum Scalar {
     Void,
     Bool,
     U8,
@@ -361,6 +367,7 @@ fn build(target: Target, release: bool, out_dir: &Path) -> Result<()> {
             Target::Wasm | Target::WasmBrowser => {
                 build_wasm(package, release, out_dir, target, &functions)?;
             }
+            Target::Scriptc => build_scriptc(package, out_dir, &library, &functions)?,
             Target::NodeKoffi | Target::Bun | Target::Deno | Target::All => {}
         }
     }
@@ -381,7 +388,8 @@ fn selected_targets(target: Target) -> Vec<Target> {
         | Target::Deno
         | Target::NodeNapi
         | Target::Wasm
-        | Target::WasmBrowser => {
+        | Target::WasmBrowser
+        | Target::Scriptc => {
             vec![target]
         }
         Target::All => vec![
@@ -446,7 +454,10 @@ fn build_node_napi(
         output.join("index.js"),
         render_bridge_loader(BridgeRuntime::NodeNapi, functions),
     )?;
-    fs::write(output.join("index.d.ts"), render_declarations(functions))?;
+    fs::write(
+        output.join("index.d.ts"),
+        render_declarations(functions, true),
+    )?;
     fs::write(
         output.join("package.json"),
         render_package_manifest(Target::NodeNapi)?,
@@ -514,7 +525,7 @@ fn build_wasm(
             functions,
         ),
     )?;
-    let mut declarations = render_declarations(functions);
+    let mut declarations = render_declarations(functions, true);
     if target == Target::WasmBrowser {
         declarations.push_str(
             "export declare function initialize(input?: import(\"./bindings.js\").InitInput | Promise<import(\"./bindings.js\").InitInput>): Promise<import(\"./bindings.js\").InitOutput>;\n",
@@ -889,7 +900,7 @@ fn generate_target(
     )?;
     fs::write(
         target_dir.join("index.d.ts"),
-        render_declarations(functions),
+        render_declarations(functions, true),
     )?;
     fs::write(
         target_dir.join("package.json"),
@@ -897,6 +908,112 @@ fn generate_target(
     )?;
     println!("generated {}", target_dir.display());
     Ok(())
+}
+
+/// Generate the scriptc transport: a C bridge, an FFI manifest, and a TypeScript
+/// adapter that scriptc compiles into a self-contained native executable.
+fn build_scriptc(
+    package: &Package,
+    out_dir: &Path,
+    library: &Path,
+    functions: &[Function],
+) -> Result<()> {
+    if cfg!(target_os = "windows") {
+        bail!("the scriptc target is not supported on Windows yet; build it on Linux or macOS");
+    }
+    scriptc::validate(functions)?;
+    let directory = package_directory(package)?;
+    let output = directory.join(out_dir).join(target_name(Target::Scriptc));
+    if output.exists() {
+        fs::remove_dir_all(&output)
+            .with_context(|| format!("failed to clean {}", output.display()))?;
+    }
+    fs::create_dir_all(&output)?;
+    let archive = static_library_path(library, package)?;
+    let archive_name = archive
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .context("static library filename is not valid UTF-8")?
+        .to_owned();
+    fs::copy(&archive, output.join(&archive_name)).with_context(|| {
+        format!(
+            "failed to copy {} into {}",
+            archive.display(),
+            output.display()
+        )
+    })?;
+    fs::write(output.join("eqts_shim.c"), scriptc::render_shim(functions))?;
+    compile_shim(&output)?;
+    fs::write(
+        output.join("ffi.json"),
+        scriptc::render_manifest(functions, &archive_name, SHIM_OBJECT),
+    )?;
+    fs::write(output.join("index.ts"), scriptc::render_adapter(functions))?;
+    fs::write(
+        output.join("index.d.ts"),
+        render_declarations(functions, false),
+    )?;
+    fs::write(output.join("README.md"), scriptc::README)?;
+    println!("generated {}", output.display());
+    Ok(())
+}
+
+fn static_library_path(library: &Path, package: &Package) -> Result<PathBuf> {
+    let directory = library
+        .parent()
+        .context("built library has no parent directory")?;
+    let name = package
+        .targets
+        .iter()
+        .find(|target| target.crate_types.contains(&CrateType::CDyLib))
+        .map(|target| target.name.replace('-', "_"))
+        .context("cdylib target disappeared")?;
+    let filename = if cfg!(target_os = "windows") {
+        format!("{name}.lib")
+    } else {
+        format!("lib{name}.a")
+    };
+    let path = directory.join(filename);
+    if !path.exists() {
+        bail!(
+            "the scriptc target links the crate as a static library and found none at {}; add \"staticlib\" to the [lib] crate-type list",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn compile_shim(directory: &Path) -> Result<()> {
+    let compiler = c_compiler()?;
+    let source = directory.join("eqts_shim.c");
+    let object = directory.join(SHIM_OBJECT);
+    let status = Command::new(&compiler)
+        .args(["-c", "-O2", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .with_context(|| format!("failed to run {compiler}"))?;
+    if !status.success() {
+        bail!(
+            "{compiler} failed to compile the scriptc bridge at {}",
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+fn c_compiler() -> Result<String> {
+    match std::env::var("CC") {
+        Ok(compiler) if !compiler.is_empty() => return Ok(compiler),
+        _ => {}
+    }
+    for candidate in ["clang", "cc", "gcc"] {
+        if Command::new(candidate).arg("--version").output().is_ok() {
+            return Ok(candidate.to_owned());
+        }
+    }
+    bail!("the scriptc target needs a C compiler for its FFI bridge; install clang or set CC")
 }
 
 fn library_package(metadata: &Metadata) -> Result<&Package> {
@@ -1295,11 +1412,12 @@ fn target_name(target: Target) -> &'static str {
         Target::NodeNapi => "node-napi",
         Target::Wasm => "wasm",
         Target::WasmBrowser => "wasm-browser",
+        Target::Scriptc => "scriptc",
         Target::All => "all",
     }
 }
 
-fn typescript_name(name: &str) -> String {
+pub(crate) fn typescript_name(name: &str) -> String {
     let mut parts = name.split('_');
     let mut output = parts.next().unwrap_or_default().to_owned();
     for part in parts {
@@ -1312,9 +1430,8 @@ fn typescript_name(name: &str) -> String {
     output
 }
 
-#[expect(clippy::too_many_lines)]
-fn render_declarations(functions: &[Function]) -> String {
-    let mut output = String::new();
+/// Render the record and enum declarations the shared value model needs.
+pub(crate) fn type_definitions(functions: &[Function]) -> String {
     let mut definitions = std::collections::BTreeMap::new();
     for function in functions {
         for parameter in &function.parameters {
@@ -1332,10 +1449,16 @@ fn render_declarations(functions: &[Function]) -> String {
             ExportKind::Function => {}
         }
     }
+    let mut output = String::new();
     for definition in definitions.values() {
         output.push_str(definition);
         output.push('\n');
     }
+    output
+}
+
+fn render_declarations(functions: &[Function], disposable_handles: bool) -> String {
+    let mut output = type_definitions(functions);
     if functions.iter().any(|function| {
         function.abi == FunctionAbi::Json || !matches!(function.kind, ExportKind::Function)
     }) {
@@ -1345,7 +1468,11 @@ fn render_declarations(functions: &[Function]) -> String {
         .iter()
         .any(|function| !matches!(function.kind, ExportKind::Function))
     {
-        output.push_str("export interface EqtsHandle<T> extends AsyncIterable<T>, AsyncIterator<T>, Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\nexport interface EqtsCallbackHandle extends Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\n");
+        if disposable_handles {
+            output.push_str("export interface EqtsHandle<T> extends AsyncIterable<T>, AsyncIterator<T>, Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\nexport interface EqtsCallbackHandle extends Disposable {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\n");
+        } else {
+            output.push_str("export interface EqtsHandle<T> extends AsyncIterable<T>, AsyncIterator<T> {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\nexport interface EqtsCallbackHandle {\n  readonly disposed: boolean;\n  dispose(): void;\n}\n\n");
+        }
     }
     for function in functions {
         let parameters = function
@@ -1483,7 +1610,7 @@ fn render_loader(
         Target::NodeKoffi => Ok(render_koffi(&path, functions)),
         Target::Bun => Ok(render_bun(&path, functions)),
         Target::Deno => Ok(render_deno(&path, functions)),
-        Target::NodeNapi | Target::Wasm | Target::WasmBrowser | Target::All => {
+        Target::NodeNapi | Target::Wasm | Target::WasmBrowser | Target::Scriptc | Target::All => {
             bail!("target {} has no loader renderer", target_name(target))
         }
     }
@@ -1803,18 +1930,32 @@ fn render_json_wrapper(output: &mut String, function: &Function, runtime: Runtim
 }
 
 fn wire_encode(expression: &str, ty: &Type) -> String {
+    wire_encode_with(expression, ty, false)
+}
+
+pub(crate) fn scriptc_wire_encode(expression: &str, ty: &Type) -> String {
+    wire_encode_with(expression, ty, true)
+}
+
+fn wire_encode_with(expression: &str, ty: &Type, scriptc_bytes: bool) -> String {
     match ty {
         Type::Scalar(Scalar::U64 | Scalar::I64) => format!("{expression}.toString()"),
-        Type::Owned(OwnedType::Bytes) => format!("Array.from({expression})"),
+        Type::Owned(OwnedType::Bytes) => {
+            if scriptc_bytes {
+                format!("[...{expression}]")
+            } else {
+                format!("Array.from({expression})")
+            }
+        }
         Type::Owned(OwnedType::Vec { value }) => {
             format!(
                 "{expression}.map((value) => {})",
-                wire_encode("value", value)
+                wire_encode_with("value", value, scriptc_bytes)
             )
         }
         Type::Owned(OwnedType::Option { value }) => format!(
             "{expression} == null ? null : {}",
-            wire_encode(expression, value)
+            wire_encode_with(expression, value, scriptc_bytes)
         ),
         Type::Owned(OwnedType::Record { fields, .. }) => {
             let fields = fields
@@ -1823,7 +1964,11 @@ fn wire_encode(expression: &str, ty: &Type) -> String {
                     format!(
                         "{}: {}",
                         field.name,
-                        wire_encode(&format!("{expression}.{}", field.name), &field.ty)
+                        wire_encode_with(
+                            &format!("{expression}.{}", field.name),
+                            &field.ty,
+                            scriptc_bytes
+                        )
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1838,18 +1983,32 @@ fn wire_encode(expression: &str, ty: &Type) -> String {
 }
 
 fn wire_decode(expression: &str, ty: &Type) -> String {
+    wire_decode_with(expression, ty, false)
+}
+
+pub(crate) fn scriptc_wire_decode(expression: &str, ty: &Type) -> String {
+    wire_decode_with(expression, ty, true)
+}
+
+fn wire_decode_with(expression: &str, ty: &Type, scriptc_bytes: bool) -> String {
     match ty {
         Type::Scalar(Scalar::U64 | Scalar::I64) => format!("BigInt({expression})"),
-        Type::Owned(OwnedType::Bytes) => format!("Uint8Array.from({expression})"),
+        Type::Owned(OwnedType::Bytes) => {
+            if scriptc_bytes {
+                format!("new Uint8Array({expression})")
+            } else {
+                format!("Uint8Array.from({expression})")
+            }
+        }
         Type::Owned(OwnedType::Vec { value }) => {
             format!(
                 "{expression}.map((value) => {})",
-                wire_decode("value", value)
+                wire_decode_with("value", value, scriptc_bytes)
             )
         }
         Type::Owned(OwnedType::Option { value }) => format!(
             "{expression} == null ? null : {}",
-            wire_decode(expression, value)
+            wire_decode_with(expression, value, scriptc_bytes)
         ),
         Type::Owned(OwnedType::Record { fields, .. }) => {
             let fields = fields
@@ -1858,7 +2017,11 @@ fn wire_decode(expression: &str, ty: &Type) -> String {
                     format!(
                         "{}: {}",
                         field.name,
-                        wire_decode(&format!("{expression}.{}", field.name), &field.ty)
+                        wire_decode_with(
+                            &format!("{expression}.{}", field.name),
+                            &field.ty,
+                            scriptc_bytes
+                        )
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2033,7 +2196,7 @@ fn render_root_package_manifest() -> Result<String> {
     Ok(output)
 }
 
-fn scalar_type(ty: &Type) -> Scalar {
+pub(crate) fn scalar_type(ty: &Type) -> Scalar {
     match ty {
         Type::Scalar(scalar) => *scalar,
         Type::Owned(_) => unreachable!("owned type reached scalar code generation"),
@@ -2047,7 +2210,7 @@ fn ts_return_type(ty: &Type) -> String {
     }
 }
 
-fn ts_type(ty: &Type) -> String {
+pub(crate) fn ts_type(ty: &Type) -> String {
     match ty {
         Type::Scalar(Scalar::Void) => "void".to_string(),
         Type::Scalar(Scalar::Bool) => "boolean".to_string(),
@@ -2071,7 +2234,7 @@ fn ts_type(ty: &Type) -> String {
     }
 }
 
-fn c_type(scalar: Scalar) -> &'static str {
+pub(crate) fn c_type(scalar: Scalar) -> &'static str {
     match scalar {
         Scalar::Void => "void",
         Scalar::Bool | Scalar::U8 => "uint8_t",
@@ -2149,7 +2312,7 @@ mod tests {
     #[test]
     fn declarations_preserve_function_shape() {
         assert_eq!(
-            render_declarations(&[add_function()]),
+            render_declarations(&[add_function()], true),
             "export declare function add(a: number, b: number): number;\n"
         );
     }
@@ -2323,7 +2486,7 @@ mod tests {
         )
         .expect("versioned metadata should parse");
         assert_eq!(
-            render_declarations(&functions),
+            render_declarations(&functions, true),
             "export declare function enabled(value: boolean, count: bigint): bigint;\n"
         );
     }
@@ -2498,7 +2661,7 @@ mod tests {
             br#"{"schema_version":3,"capabilities":{"owned_values":true,"objects":true,"async_functions":true,"callbacks":true,"traits":true,"streams":true,"iterators":true},"functions":[{"module":"fixture","name":"events","symbol":"eqts_events","abi":"json","kind":"stream","parameters":[],"result":{"kind":"scalar","scalar":"u64"},"item":{"kind":"string"}}]}"#,
         )
         .expect("described reactive metadata should parse");
-        let declarations = render_declarations(&functions);
+        let declarations = render_declarations(&functions, true);
         assert!(declarations.contains("interface EqtsHandle<T>"));
         assert!(declarations.contains("events(): EqtsHandle<string>"));
     }
@@ -2567,7 +2730,7 @@ mod tests {
         let function = reactive_function(ExportKind::Async {
             value: Type::Owned(OwnedType::String),
         });
-        let declarations = render_declarations(std::slice::from_ref(&function));
+        let declarations = render_declarations(std::slice::from_ref(&function), true);
         assert!(declarations.contains("options?: { signal?: AbortSignal }"));
         let loader = render_bridge_loader(BridgeRuntime::WasmBrowser, &[function]);
         assert!(loader.contains("signal?.aborted"));
@@ -2639,7 +2802,7 @@ mod tests {
             value: Type::Owned(OwnedType::String),
             callback_parameter: "on_event".to_string(),
         });
-        let declarations = render_declarations(std::slice::from_ref(&function));
+        let declarations = render_declarations(std::slice::from_ref(&function), true);
         assert!(declarations.contains("onEvent: (value: string) => void | Promise<void>"));
         let loader = render_bridge_loader(BridgeRuntime::NodeNapi, &[function]);
         assert!(loader.contains("await callback(decode(__eqtsNormalize(poll.value)))"));
@@ -2674,7 +2837,7 @@ mod tests {
             mutable: false,
             asynchronous: true,
         });
-        let declarations = render_declarations(&functions);
+        let declarations = render_declarations(&functions, true);
         assert!(declarations.contains("increment(by: number): number"));
         assert!(
             declarations.contains("fetch(options?: { signal?: AbortSignal }): Promise<string>")
@@ -2797,7 +2960,7 @@ mod tests {
         .expect("owned metadata should parse");
         assert_eq!(functions[0].abi, FunctionAbi::Json);
         assert!(
-            render_declarations(&functions)
+            render_declarations(&functions, true)
                 .contains("load(names: Array<string>): Uint8Array | null")
         );
     }
@@ -2809,14 +2972,14 @@ mod tests {
         )
         .expect("canonical tagged scalar metadata should parse");
         assert_eq!(
-            render_declarations(&functions),
+            render_declarations(&functions, true),
             "export declare function add(a: number): bigint;\n"
         );
     }
 
     #[test]
     fn owned_declarations_include_records_and_throwing_result() {
-        let declarations = render_declarations(&[owned_function()]);
+        let declarations = render_declarations(&[owned_function()], true);
         assert!(declarations.contains("export interface Person"));
         assert!(declarations.contains("id: bigint;"));
         assert!(declarations.contains("export declare class EqtsError"));
@@ -2940,5 +3103,158 @@ mod tests {
         for path in [".", "./node-koffi", "./bun", "./deno", "./wasm"] {
             assert!(manifest["exports"].get(path).is_some(), "{path}");
         }
+    }
+
+    #[test]
+    fn scriptc_target_is_built_on_its_own() {
+        assert_eq!(selected_targets(Target::Scriptc), [Target::Scriptc]);
+        assert!(!selected_targets(Target::All).contains(&Target::Scriptc));
+    }
+
+    #[test]
+    fn scriptc_rejects_scalars_without_an_ffi_class() {
+        let mut function = add_function();
+        function.parameters[0].ty = Type::Scalar(Scalar::U64);
+        let error = scriptc::validate(&[function]).expect_err("u64 has no scriptc FFI class");
+        assert!(error.to_string().contains("u64"));
+        assert!(error.to_string().contains("scriptc"));
+    }
+
+    #[test]
+    fn scriptc_rejects_reactive_kinds_it_cannot_bridge() {
+        let error = scriptc::validate(&[reactive_function(ExportKind::Async {
+            value: Type::Owned(OwnedType::String),
+        })])
+        .expect_err("asynchronous exports are not bridged yet");
+        assert!(error.to_string().contains("asynchronous"));
+    }
+
+    #[test]
+    fn scriptc_rejects_reserved_bridge_names() {
+        let mut function = add_function();
+        function.name = "bridge_poll".to_string();
+        let error = scriptc::validate(&[function]).expect_err("reserved names must fail");
+        assert!(error.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn scriptc_rejects_result_stream_items() {
+        let error = scriptc::validate(&[reactive_function(ExportKind::Stream {
+            item: Type::Owned(OwnedType::Result {
+                ok: Box::new(Type::Scalar(Scalar::U32)),
+                error: Box::new(Type::Owned(OwnedType::String)),
+            }),
+        })])
+        .expect_err("Result items have no single TypeScript shape");
+        assert!(error.to_string().contains("Result"));
+    }
+
+    #[test]
+    fn scriptc_shim_turns_out_pointers_into_callbacks() {
+        let shim = scriptc::render_shim(&[add_function()]);
+        assert!(
+            shim.contains("int32_t eqts_sc_add(uint32_t a, uint32_t b, void (*emit)(uint32_t))")
+        );
+        assert!(shim.contains("int32_t status = eqts_add(a, b, &output);"));
+        assert!(shim.contains("if (status == 0 && emit != NULL) emit(output);"));
+    }
+
+    #[test]
+    fn scriptc_shim_carries_handles_as_u32_pairs() {
+        let shim = scriptc::render_shim(&[reactive_function(ExportKind::Stream {
+            item: Type::Scalar(Scalar::U32),
+        })]);
+        assert!(shim.contains(
+            "int32_t eqts_sc_events(const uint8_t *input, size_t len, void (*emit)(uint32_t, uint32_t))"
+        ));
+        assert!(shim.contains("emit((uint32_t)(handle >> 32), (uint32_t)(handle & 0xffffffffu))"));
+        assert!(shim.contains("int32_t eqts_sc_bridge_poll(uint32_t hi, uint32_t lo"));
+        assert!(shim.contains("eqts_buffer_free_v1(output.ptr, output.len, output.capacity);"));
+    }
+
+    #[test]
+    fn scriptc_shim_forwards_void_exports_without_an_out_pointer() {
+        let mut function = add_function();
+        function.result = Type::Scalar(Scalar::Void);
+        let shim = scriptc::render_shim(&[function]);
+        assert!(shim.contains("extern int32_t eqts_add(uint32_t a, uint32_t b);"));
+        assert!(
+            shim.contains(
+                "int32_t eqts_sc_add(uint32_t a, uint32_t b) {\n  return eqts_add(a, b);"
+            )
+        );
+    }
+
+    #[test]
+    fn scriptc_manifest_links_bridge_and_archive() {
+        let manifest: serde_json::Value = serde_json::from_str(&scriptc::render_manifest(
+            &[add_function()],
+            "libfixture.a",
+            "eqts_shim.o",
+        ))
+        .expect("manifest should parse");
+        assert_eq!(manifest["ffi_format"], 3);
+        assert_eq!(manifest["libraries"][0], "./eqts_shim.o");
+        assert_eq!(manifest["libraries"][1], "./libfixture.a");
+        let params = &manifest["functions"][0]["params"];
+        assert_eq!(params[0], "u32");
+        assert_eq!(params[2]["callback"]["params"][0], "u32");
+        assert_eq!(params[2]["callback"]["lifetime"], "call");
+        assert_eq!(manifest["functions"][0]["symbol"], "eqts_sc_add");
+    }
+
+    #[test]
+    fn scriptc_adapter_uses_lowerings_scriptc_supports() {
+        let mut bytes_function = add_function();
+        bytes_function.name = "reverse".to_string();
+        bytes_function.symbol = "eqts_reverse".to_string();
+        bytes_function.abi = FunctionAbi::Json;
+        bytes_function.parameters = vec![Parameter {
+            name: "value".to_string(),
+            ty: Type::Owned(OwnedType::Bytes),
+        }];
+        bytes_function.result = Type::Owned(OwnedType::Bytes);
+        let functions = vec![
+            add_function(),
+            owned_function(),
+            bytes_function,
+            reactive_function(ExportKind::Stream {
+                item: Type::Scalar(Scalar::U32),
+            }),
+        ];
+        let adapter = scriptc::render_adapter(&functions);
+        assert!(adapter.contains(
+            "declare function eqtsScAdd(a: number, b: number, emit: (value: number) => void): number;"
+        ));
+        assert!(adapter.contains("[Symbol.asyncIterator](): EqtsHandle<T> { return this; }"));
+        assert!(adapter.contains(
+            "JSON.parse(__eqtsText) as { ok: { name: string; id: string } } | { error: string }"
+        ));
+        assert!(adapter.contains("BigInt(__eqtsDecoded.ok.id)"));
+        assert!(adapter.contains("[...value]"));
+        assert!(adapter.contains("new Uint8Array(__eqtsDecoded)"));
+        // Lowerings scriptc does not implement, so the adapter must avoid them.
+        for unsupported in [
+            "dlopen",
+            "FinalizationRegistry",
+            "Symbol.dispose",
+            "Array.from",
+            "Uint8Array.from",
+            "Object.hasOwn",
+        ] {
+            assert!(!adapter.contains(unsupported), "{unsupported}");
+        }
+    }
+
+    #[test]
+    fn scriptc_declarations_omit_symbol_dispose() {
+        let functions = vec![reactive_function(ExportKind::Stream {
+            item: Type::Scalar(Scalar::U32),
+        })];
+        let declarations = render_declarations(&functions, false);
+        assert!(declarations.contains(
+            "export interface EqtsHandle<T> extends AsyncIterable<T>, AsyncIterator<T> {\n"
+        ));
+        assert!(!declarations.contains("Disposable"));
     }
 }

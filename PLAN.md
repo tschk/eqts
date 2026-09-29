@@ -29,13 +29,13 @@ Cargo features select available transports:
 - `deno`
 - `wasm`
 
-`cargo eqts build --target <target>` emits one selected artifact. `--target all` emits every enabled target. The root Node import uses Node-API; explicit package subpaths select Koffi, Bun, Deno, or Wasm.
+`cargo eqts build --target <target>` emits one selected artifact. `--target all` emits every enabled target. The root Node import uses Node-API; explicit package subpaths select Koffi, Bun, Deno, or Wasm. The `scriptc` target is built explicitly and is not part of `--target all`.
 
 ## Architecture
 
 The workspace contains three crates: public API `eqts`, proc macros `eqts-macros`, and `cargo-eqts`. Proc macros validate signatures, export backend wrappers, and register transport-neutral metadata. `cargo-eqts` reads that metadata and generates one canonical declaration model plus small runtime loaders.
 
-Node-API uses napi-rs. Koffi, Bun, and Deno share a stable C ABI dynamic library. Wasm uses wasm-bindgen. Equilibrium integration follows the standalone release and consumes its existing C headers; Inauguration is not a dependency.
+Node-API uses napi-rs. Koffi, Bun, and Deno share a stable C ABI dynamic library. Wasm uses wasm-bindgen. The experimental `scriptc` target instead emits a generated C bridge, an FFI manifest, and a TypeScript adapter, and links the crate's static library into a self-contained executable built by [scriptc](https://scriptc.dev); it covers synchronous functions, streams, and iterators. Equilibrium integration follows the standalone release and consumes its existing C headers; Inauguration is not a dependency.
 
 ## Delivery order
 

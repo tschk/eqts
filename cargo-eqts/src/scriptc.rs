@@ -471,11 +471,12 @@ export class EqtsHandle<T> {\n\
 \x20 }\n\
 \x20 async next(): Promise<IteratorResult<T>> {\n\
 \x20   if (this.__eqtsDisposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n\
+\x20   let __eqtsDelay = 0;\n\
 \x20   for (;;) {\n\
 \x20     let __eqtsText = \"\";\n\
 \x20     const __eqtsStatus = eqtsScBridgePoll(this.hi, this.lo, (data: Uint8Array) => { __eqtsText = __eqtsDecode(data); });\n\
 \x20     if (__eqtsStatus === 14) throw new EqtsError(\"UNKNOWN_HANDLE\", __eqtsText);\n\
-\x20     if (__eqtsStatus === 10) { await new Promise<void>((resolve) => { setTimeout(resolve, 0); }); continue; }\n\
+\x20     if (__eqtsStatus === 10) { const __eqtsWait = __eqtsDelay; await new Promise<void>((resolve) => { setTimeout(resolve, __eqtsWait); }); __eqtsDelay = __eqtsDelay === 0 ? 1 : (__eqtsDelay >= 25 ? 50 : __eqtsDelay * 2); continue; }\n\
 \x20     if (__eqtsStatus === 11 || __eqtsStatus === 13) return { value: JSON.parse(__eqtsText) as T, done: false };\n\
 \x20     if (__eqtsStatus === 12) { this.dispose(); return { value: undefined, done: true }; }\n\
 \x20     throw new EqtsError(\"REACTIVE_POLL\", `reactive poll failed with ABI status ${__eqtsStatus}`);\n\

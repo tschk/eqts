@@ -172,9 +172,37 @@ impl eqts::ReactiveResource for CallbackSequence {
     }
 }
 
+static PENDING_TASKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+struct PendingTaskGuard;
+
+impl Drop for PendingTaskGuard {
+    fn drop(&mut self) {
+        PENDING_TASKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[eqts::async_export(String)]
 pub async fn pending_task() -> String {
+    PENDING_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _guard = PendingTaskGuard;
     std::future::pending().await
+}
+
+/// Number of `pending_task` futures still alive, so tests can observe cancellation.
+#[eqts::export]
+pub fn pending_tasks() -> u32 {
+    PENDING_TASKS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[eqts::async_export(String)]
+pub async fn panicking_task() -> String {
+    panic!("task boom")
+}
+
+#[eqts::export]
+pub fn echo_floats(values: Vec<f64>) -> Vec<f64> {
+    values
 }
 
 #[eqts::callback(String)]

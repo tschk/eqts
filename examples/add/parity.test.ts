@@ -31,6 +31,12 @@ for (const [name, backend] of Object.entries({ napi, wasm, bunFfi })) {
       expect(backend.currentStatus()).toBe("Ready");
     });
 
+    test("round-trips non-finite floats on JSON paths", () => {
+      expect(
+        backend.echoFloats([Number.NaN, Infinity, -Infinity, 1.5]),
+      ).toEqual([Number.NaN, Infinity, -Infinity, 1.5]);
+    });
+
     test("preserves structured Rust errors", () => {
       try {
         backend.personOrError(false);

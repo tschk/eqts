@@ -1,4 +1,7 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct Values(VecDeque<u32>);
@@ -217,6 +220,10 @@ fn reactive_abi_catches_panics() {
         unsafe { eqts_reactive_poll_v1(poll_handle, &raw mut output) },
         eqts::ABI_PANIC
     );
+    assert!(!output.ptr.is_null(), "poll panic must carry its message");
+    // SAFETY: allocation came from the poll wrapper and is consumed once.
+    let message = unsafe { Vec::from_raw_parts(output.ptr, output.len, output.capacity) };
+    assert_eq!(message, br#""poll boom""#);
 
     let object = eqts::register_object(PanicMethods);
     let input = br#"{"method":"push","arguments":[]}"#;
@@ -228,6 +235,77 @@ fn reactive_abi_catches_panics() {
         },
         eqts::ABI_PANIC
     );
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn wait_for(flag: &AtomicBool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if flag.load(Ordering::SeqCst) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+fn pending_future_with_flag() -> (u64, Arc<AtomicBool>) {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = DropFlag(Arc::clone(&dropped));
+    let handle = eqts::register_future(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    (handle, dropped)
+}
+
+#[test]
+fn cancelling_or_disposing_a_future_stops_the_running_work() {
+    let (cancelled, cancelled_dropped) = pending_future_with_flag();
+    assert_eq!(eqts::cancel_reactive(cancelled), eqts::ABI_OK);
+    assert!(
+        wait_for(&cancelled_dropped),
+        "cancel must drop the running future"
+    );
+    assert_eq!(
+        eqts::poll_reactive(cancelled).expect("cancelled handle").0,
+        eqts::ABI_REACTIVE_DONE
+    );
+    assert_eq!(eqts::dispose_reactive(cancelled), eqts::ABI_OK);
+
+    let (disposed, disposed_dropped) = pending_future_with_flag();
+    assert_eq!(eqts::dispose_reactive(disposed), eqts::ABI_OK);
+    assert!(
+        wait_for(&disposed_dropped),
+        "dispose must drop the running future"
+    );
+}
+
+#[test]
+fn future_panic_settles_with_the_panic_message() {
+    let handle = eqts::register_future::<u32, _>(async { panic!("future boom") });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let settled = loop {
+        match eqts::poll_reactive(handle).expect("future handle exists") {
+            (eqts::ABI_REACTIVE_PENDING, _) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            settled => break settled,
+        }
+    };
+    assert_eq!(
+        settled,
+        (eqts::ABI_PANIC, Some(br#""future boom""#.to_vec())),
+        "a panicking future must settle instead of staying pending"
+    );
+    assert_eq!(eqts::dispose_reactive(handle), eqts::ABI_OK);
 }
 
 #[test]

@@ -479,6 +479,8 @@ export class EqtsHandle<T> {\n\
 \x20     if (__eqtsStatus === 10) { const __eqtsWait = __eqtsDelay; await new Promise<void>((resolve) => { setTimeout(resolve, __eqtsWait); }); __eqtsDelay = __eqtsDelay === 0 ? 1 : (__eqtsDelay >= 25 ? 50 : __eqtsDelay * 2); continue; }\n\
 \x20     if (__eqtsStatus === 11 || __eqtsStatus === 13) return { value: JSON.parse(__eqtsText) as T, done: false };\n\
 \x20     if (__eqtsStatus === 12) { this.dispose(); return { value: undefined, done: true }; }\n\
+\x20     if (__eqtsStatus === 1) throw new EqtsError(\"RUST_PANIC\", __eqtsText.length > 0 ? JSON.parse(__eqtsText) as string : \"eqts panic\");\n\
+\x20     if (__eqtsStatus === 4 && __eqtsText.length > 0) throw new EqtsError(\"RUST_ERROR\", JSON.parse(__eqtsText) as string);\n\
 \x20     throw new EqtsError(\"REACTIVE_POLL\", `reactive poll failed with ABI status ${__eqtsStatus}`);\n\
 \x20   }\n\
 \x20 }\n\

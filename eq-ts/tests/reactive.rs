@@ -256,19 +256,25 @@ fn wait_for(flag: &AtomicBool) -> bool {
     false
 }
 
-fn pending_future_with_flag() -> (u64, Arc<AtomicBool>) {
+/// Register a never-ending future and wait until it is running, so cancellation is tested
+/// against a suspended task rather than one dropped before its first poll.
+fn running_future_with_flag() -> (u64, Arc<AtomicBool>) {
     let dropped = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
     let guard = DropFlag(Arc::clone(&dropped));
+    let started_in_task = Arc::clone(&started);
     let handle = eqts::register_future(async move {
         let _guard = guard;
+        started_in_task.store(true, Ordering::SeqCst);
         std::future::pending::<()>().await;
     });
+    assert!(wait_for(&started), "future never started");
     (handle, dropped)
 }
 
 #[test]
 fn cancelling_or_disposing_a_future_stops_the_running_work() {
-    let (cancelled, cancelled_dropped) = pending_future_with_flag();
+    let (cancelled, cancelled_dropped) = running_future_with_flag();
     assert_eq!(eqts::cancel_reactive(cancelled), eqts::ABI_OK);
     assert!(
         wait_for(&cancelled_dropped),
@@ -280,7 +286,7 @@ fn cancelling_or_disposing_a_future_stops_the_running_work() {
     );
     assert_eq!(eqts::dispose_reactive(cancelled), eqts::ABI_OK);
 
-    let (disposed, disposed_dropped) = pending_future_with_flag();
+    let (disposed, disposed_dropped) = running_future_with_flag();
     assert_eq!(eqts::dispose_reactive(disposed), eqts::ABI_OK);
     assert!(
         wait_for(&disposed_dropped),

@@ -3278,6 +3278,13 @@ mod tests {
             "declare function eqtsScAdd(a: number, b: number, emit: (value: number) => void): number;"
         ));
         assert!(adapter.contains("[Symbol.asyncIterator](): EqtsHandle<T> { return this; }"));
+        // Poll panics and errors carry a JSON-encoded message; the iterator must surface it.
+        assert!(adapter.contains(
+            "if (__eqtsStatus === 1) throw new EqtsError(\"RUST_PANIC\", __eqtsText.length > 0 ? JSON.parse(__eqtsText) as string"
+        ));
+        assert!(adapter.contains(
+            "if (__eqtsStatus === 4 && __eqtsText.length > 0) throw new EqtsError(\"RUST_ERROR\", JSON.parse(__eqtsText) as string)"
+        ));
         assert!(adapter.contains(
             "JSON.parse(__eqtsText) as { ok: { name: string; id: string } } | { error: string }"
         ));

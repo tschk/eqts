@@ -22,7 +22,7 @@ Add eqts to a Rust library that emits both a Rust library and a dynamic library:
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eqts = "0.2"
+eqts = "0.3"
 ```
 
 Install the generator and build every adapter:
@@ -84,7 +84,7 @@ Browser Wasm is available through `--target wasm-browser` and exposes an async `
 
 ## Compatibility
 
-eqts 0.2 requires Rust 1.88 or newer. The generated declarations are verified with TypeScript 7. Node-API uses Node 20.17 or newer through the pinned napi-rs toolchain. Native packages are designed for prebuilt artifacts and do not require install-time downloads or a consumer Rust compiler.
+eqts 0.3 requires Rust 1.88 or newer. The generated declarations are verified with TypeScript 7. Node-API uses Node 20.17 or newer through the pinned napi-rs toolchain. Native packages are designed for prebuilt artifacts and do not require install-time downloads or a consumer Rust compiler.
 
 ## Project links
 

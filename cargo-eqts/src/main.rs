@@ -580,7 +580,7 @@ fn render_bridge_loader(runtime: BridgeRuntime, functions: &[Function]) -> Strin
 }
 
 fn reactive_runtime() -> &'static str {
-    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (;;) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw new EqtsError(\"REACTIVE_POLL\", poll);\n        }\n      } catch (error) { resource.dispose(); throw error; } finally { outstanding = false; }\n    },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, 0)); continue; } if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw new EqtsError(\"REACTIVE_POLL\", poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const abort = () => bindings.eqtsReactiveCancel(handle);\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  const iterator = __eqtsHandle(handle, decode);\n  try {\n    const result = await iterator.next();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    return result.value;\n  } finally { iterator.dispose(); signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
+    "const __eqtsFinalizer = new FinalizationRegistry((handle) => bindings.eqtsHandleDispose(handle));\n\nfunction __eqtsPollError(poll) {\n  if (poll.status === 1) return new EqtsError(\"RUST_PANIC\", poll.value ?? \"eqts panic\");\n  if (poll.status === 4 && typeof poll.value === \"string\") return new EqtsError(\"RUST_ERROR\", poll.value);\n  return new EqtsError(\"REACTIVE_POLL\", poll);\n}\n\nfunction __eqtsHandle(handle, decode) {\n  let disposed = false;\n  let outstanding = false;\n  let waker = null;\n  const resource = {\n    get disposed() { return disposed; },\n    dispose() {\n      if (disposed) return;\n      disposed = true;\n      __eqtsFinalizer.unregister(resource);\n      bindings.eqtsHandleDispose(handle);\n    },\n    async next() {\n      if (disposed) throw new EqtsError(\"USE_AFTER_DISPOSE\", \"reactive handle is disposed\");\n      if (outstanding) throw new EqtsError(\"CONCURRENT_NEXT\", \"only one next() call may be outstanding\");\n      outstanding = true;\n      try {\n        for (let delay = 0; ; delay = Math.min(delay * 2 || 1, 50)) {\n          const poll = bindings.eqtsReactivePoll(handle);\n          if (poll.status === 10) {\n            await new Promise((resolve) => { waker = resolve; setTimeout(resolve, delay); });\n            waker = null;\n            if (disposed) return { value: undefined, done: true };\n            continue;\n          }\n          if (poll.status === 11 || poll.status === 13) return { value: decode(__eqtsNormalize(poll.value)), done: false };\n          if (poll.status === 12) { resource.dispose(); return { value: undefined, done: true }; }\n          throw __eqtsPollError(poll);\n        }\n      } catch (error) { resource.dispose(); throw error; } finally { outstanding = false; }\n    },\n    __eqtsWake() { waker?.(); },\n    async return() { bindings.eqtsReactiveCancel(handle); resource.dispose(); return { value: undefined, done: true }; },\n    [Symbol.asyncIterator]() { return resource; },\n    [Symbol.dispose]() { resource.dispose(); },\n  };\n  __eqtsFinalizer.register(resource, handle, resource);\n  return resource;\n}\n\nfunction __eqtsCallback(handle, callback, decode) {\n  let disposed = false;\n  const resource = { get disposed() { return disposed; }, dispose() { if (disposed) return; disposed = true; __eqtsFinalizer.unregister(resource); bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); }, [Symbol.dispose]() { resource.dispose(); } };\n  __eqtsFinalizer.register(resource, handle, resource);\n  void (async () => {\n    try {\n      let delay = 0;\n      while (!disposed) { const poll = bindings.eqtsReactivePoll(handle); if (poll.status === 10) { await new Promise((resolve) => setTimeout(resolve, delay)); delay = Math.min(delay * 2 || 1, 50); continue; } delay = 0; if (poll.status === 13) { await callback(decode(__eqtsNormalize(poll.value))); continue; } if (poll.status === 12) { resource.dispose(); return; } throw __eqtsPollError(poll); }\n    } catch (error) { resource.dispose(); queueMicrotask(() => { throw error; }); }\n  })();\n  return resource;\n}\n\nasync function __eqtsAwait(handle, signal, decode) {\n  if (signal?.aborted) { bindings.eqtsReactiveCancel(handle); bindings.eqtsHandleDispose(handle); throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\"); }\n  const iterator = __eqtsHandle(handle, decode);\n  const abort = () => { bindings.eqtsReactiveCancel(handle); iterator.__eqtsWake(); };\n  signal?.addEventListener(\"abort\", abort, { once: true });\n  try {\n    const result = await iterator.next();\n    if (signal?.aborted) throw signal.reason ?? new DOMException(\"Aborted\", \"AbortError\");\n    if (result.done) throw new EqtsError(\"CANCELLED\", \"async operation was cancelled\");\n    return result.value;\n  } finally { iterator.dispose(); signal?.removeEventListener(\"abort\", abort); }\n}\n\n"
 }
 
 fn render_reactive_function(output: &mut String, function: &Function) {
@@ -1940,6 +1940,10 @@ pub(crate) fn scriptc_wire_encode(expression: &str, ty: &Type) -> String {
 fn wire_encode_with(expression: &str, ty: &Type, scriptc_bytes: bool) -> String {
     match ty {
         Type::Scalar(Scalar::U64 | Scalar::I64) => format!("{expression}.toString()"),
+        // JSON cannot carry NaN or Infinity; send them as the strings Rust decodes.
+        Type::Scalar(Scalar::F32 | Scalar::F64) if !scriptc_bytes => {
+            format!("(Number.isFinite({expression}) ? {expression} : String({expression}))")
+        }
         Type::Owned(OwnedType::Bytes) => {
             if scriptc_bytes {
                 format!("[...{expression}]")
@@ -1993,6 +1997,9 @@ pub(crate) fn scriptc_wire_decode(expression: &str, ty: &Type) -> String {
 fn wire_decode_with(expression: &str, ty: &Type, scriptc_bytes: bool) -> String {
     match ty {
         Type::Scalar(Scalar::U64 | Scalar::I64) => format!("BigInt({expression})"),
+        Type::Scalar(Scalar::F32 | Scalar::F64) if !scriptc_bytes => {
+            format!("(typeof {expression} === \"string\" ? Number({expression}) : {expression})")
+        }
         Type::Owned(OwnedType::Bytes) => {
             if scriptc_bytes {
                 format!("new Uint8Array({expression})")
@@ -2796,6 +2803,50 @@ mod tests {
         assert!(status.success());
     }
 
+    fn run_async_loader(bindings: &str, script: &str) -> bool {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let function = reactive_function(ExportKind::Async {
+            value: Type::Owned(OwnedType::String),
+        });
+        fs::write(temporary.path().join("bindings.js"), bindings).expect("write bindings");
+        fs::write(
+            temporary.path().join("index.js"),
+            render_bridge_loader(BridgeRuntime::NodeNapi, &[function]),
+        )
+        .expect("write loader");
+        fs::write(temporary.path().join("test.js"), script).expect("write test");
+        Command::new("bun")
+            .arg("test.js")
+            .current_dir(temporary.path())
+            .status()
+            .expect("Bun must be installed for generated JavaScript tests")
+            .success()
+    }
+
+    #[test]
+    fn reactive_pending_poll_backs_off_and_abort_rejects_promptly() {
+        assert!(run_async_loader(
+            "export let polls = 0; let cancelled = false; export function events() { return 7n; } export function eqtsReactivePoll() { polls++; return { status: cancelled ? 12 : 10, value: null }; } export function eqtsReactiveCancel() { cancelled = true; } export function eqtsHandleDispose() {}",
+            "import { events } from './index.js'; import * as bindings from './bindings.js'; const controller = new AbortController(); const reason = new Error('stop'); const pending = events({ signal: controller.signal }); await new Promise((resolve) => setTimeout(resolve, 300)); const polls = bindings.polls; const started = performance.now(); controller.abort(reason); let rejected; try { await pending; } catch (error) { rejected = error; } const latency = performance.now() - started; if (polls > 30) throw new Error(`busy polling: ${polls} polls in 300ms`); if (rejected !== reason) throw new Error(`abort did not reject with its reason: ${rejected}`); if (latency > 20) throw new Error(`abort took ${latency}ms`);",
+        ));
+    }
+
+    #[test]
+    fn reactive_async_done_without_value_rejects_as_cancelled() {
+        assert!(run_async_loader(
+            "export function events() { return 7n; } export function eqtsReactivePoll() { return { status: 12, value: null }; } export function eqtsReactiveCancel() {} export function eqtsHandleDispose() {}",
+            "import { events } from './index.js'; let code; try { await events(); } catch (error) { code = error.code; } if (code !== 'CANCELLED') throw new Error(`expected CANCELLED rejection, got ${code}`);",
+        ));
+    }
+
+    #[test]
+    fn reactive_poll_panic_and_error_reject_with_rust_message() {
+        assert!(run_async_loader(
+            "let calls = 0; export function events() { return 7n; } export function eqtsReactivePoll() { calls++; return calls === 1 ? { status: 1, value: 'task boom' } : { status: 4, value: 'task failed' }; } export function eqtsReactiveCancel() {} export function eqtsHandleDispose() {}",
+            "import { events } from './index.js'; for (const [code, message] of [['RUST_PANIC', 'task boom'], ['RUST_ERROR', 'task failed']]) { let error; try { await events(); } catch (caught) { error = caught; } if (error?.code !== code || error?.message !== message) throw new Error(`expected ${code} ${message}, got ${error?.code} ${error?.message}`); }",
+        ));
+    }
+
     #[test]
     fn callback_dispatch_is_js_threaded_and_errors_cancel_resource() {
         let function = reactive_function(ExportKind::Callback {
@@ -3227,6 +3278,13 @@ mod tests {
             "declare function eqtsScAdd(a: number, b: number, emit: (value: number) => void): number;"
         ));
         assert!(adapter.contains("[Symbol.asyncIterator](): EqtsHandle<T> { return this; }"));
+        // Poll panics and errors carry a JSON-encoded message; the iterator must surface it.
+        assert!(adapter.contains(
+            "if (__eqtsStatus === 1) throw new EqtsError(\"RUST_PANIC\", __eqtsText.length > 0 ? JSON.parse(__eqtsText) as string"
+        ));
+        assert!(adapter.contains(
+            "if (__eqtsStatus === 4 && __eqtsText.length > 0) throw new EqtsError(\"RUST_ERROR\", JSON.parse(__eqtsText) as string)"
+        ));
         assert!(adapter.contains(
             "JSON.parse(__eqtsText) as { ok: { name: string; id: string } } | { error: string }"
         ));

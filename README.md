@@ -22,7 +22,7 @@ Add eqts to a Rust library that emits both a Rust library and a dynamic library:
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eqts = "0.2"
+eqts = "0.3"
 ```
 
 Install the generator and build every adapter:
@@ -76,15 +76,15 @@ Verified against scriptc 0.1.4 and 0.1.5, which ship a byte-identical FFI surfac
 
 The build needs a static library, so the crate's `[lib] crate-type` must include `staticlib`, and it needs a C compiler on `PATH` (or `CC`) to compile the bridge. `--target all` does not include `scriptc`, and the target is not yet supported on Windows.
 
-Native owned values use a versioned JSON ABI with explicit buffer ownership. Rust `Result` errors become `EqtsError`; 64-bit integers become TypeScript `bigint`; bytes become `Uint8Array`. Generated TypeScript function names use camel case while Rust symbols remain snake case.
+Native owned values use a versioned JSON ABI with explicit buffer ownership. Rust `Result` errors become `EqtsError`; 64-bit integers become TypeScript `bigint`; bytes become `Uint8Array`. `NaN`, `Infinity`, and `-Infinity` inside JSON-carried values (vectors, options, records, reactive items) travel as the strings `"NaN"`, `"Infinity"`, and `"-Infinity"` and are decoded back to numbers by the generated glue; any other string where a float is expected is rejected. The scriptc adapter does not decode these tags, so non-finite floats inside scriptc JSON values are unsupported. Generated TypeScript function names use camel case while Rust symbols remain snake case.
 
-Reactive exports use web-standard TypeScript contracts. Async functions and async methods return cancellable promises through an optional `AbortSignal`; streams and iterators are demand-driven `AsyncIterable` handles with one outstanding `next()` call; callbacks are dispatched on the JavaScript thread with one-item backpressure. Stateful handles expose idempotent `dispose()` and `Symbol.dispose`, reject use after disposal, and register a finalizer as a safety net. `#[eqts::methods]` supplies typed sync and async methods for object and structural-trait proxies. Arbitrary Rust `dyn Trait` values and mutable async methods are intentionally rejected because they cannot satisfy the shared ownership contract.
+Reactive exports use web-standard TypeScript contracts. Async functions and async methods return cancellable promises through an optional `AbortSignal`; streams and iterators are demand-driven `AsyncIterable` handles with one outstanding `next()` call; callbacks are dispatched on the JavaScript thread with one-item backpressure. Aborting drops the Rust future the next time its executor polls it (a future suspended at an `.await` is woken and dropped) and rejects the promise with the signal's reason (an async result that ends without a value rejects with `EqtsError` code `CANCELLED`); blocking code inside a future cannot be interrupted. A panic in async work or in a reactive `poll` rejects with `EqtsError` code `RUST_PANIC` carrying the panic message on the native and Node-API targets. On the Wasm targets Rust panics abort instead of unwinding (wasm32 does not unwind). A panic in background async work, which runs on `spawn_local` outside any JavaScript call, traps there and leaves its promise pending. A panic raised while `eqtsReactivePoll` runs surfaces as a `RuntimeError` and rejects the outstanding `next()` promise. Pending work has no cross-thread wakeup: the generated glue polls with a bounded exponential backoff from 0 ms up to 50 ms per attempt, so readiness can be observed up to 50 ms late. Stateful handles expose idempotent `dispose()` and `Symbol.dispose`, reject use after disposal, and register a finalizer as a safety net. `#[eqts::methods]` supplies typed sync and async methods for object and structural-trait proxies. Arbitrary Rust `dyn Trait` values and mutable async methods are intentionally rejected because they cannot satisfy the shared ownership contract.
 
 Browser Wasm is available through `--target wasm-browser` and exposes an async `initialize()` function. `--target wasm` remains the synchronous Node-compatible build. `--target all` emits both plus a consolidated conditional-exports manifest.
 
 ## Compatibility
 
-eqts 0.2 requires Rust 1.88 or newer. The generated declarations are verified with TypeScript 7. Node-API uses Node 20.17 or newer through the pinned napi-rs toolchain. Native packages are designed for prebuilt artifacts and do not require install-time downloads or a consumer Rust compiler.
+eqts 0.3 requires Rust 1.88 or newer. The generated declarations are verified with TypeScript 7. Node-API uses Node 20.17 or newer through the pinned napi-rs toolchain. Native packages are designed for prebuilt artifacts and do not require install-time downloads or a consumer Rust compiler.
 
 ## Project links
 

@@ -394,22 +394,37 @@ pub fn register_callback<T: EqtsValue>(
     insert_entry(resource, queue, None)
 }
 
+type FutureOutcome = std::thread::Result<Result<serde_json::Value, String>>;
+
 struct FutureResource {
-    state: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
+    state: Arc<Mutex<Option<FutureOutcome>>>,
+    abort: futures::future::AbortHandle,
 }
 
 impl ReactiveResource for FutureResource {
     fn poll(&mut self) -> Result<ReactivePoll, String> {
-        match self
+        let outcome = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
+            .take();
+        match outcome {
             None => Ok(ReactivePoll::Pending),
-            Some(Ok(value)) => Ok(ReactivePoll::Ready(value)),
-            Some(Err(error)) => Err(error),
+            Some(Ok(Ok(value))) => Ok(ReactivePoll::Ready(value)),
+            Some(Ok(Err(error))) => Err(error),
+            // Re-raise the task's panic so `poll_reactive` reports it like a poll panic.
+            Some(Err(payload)) => std::panic::resume_unwind(payload),
         }
+    }
+
+    fn cancel(&mut self) {
+        self.abort.abort();
+    }
+}
+
+impl Drop for FutureResource {
+    fn drop(&mut self) {
+        self.abort.abort();
     }
 }
 
@@ -419,15 +434,21 @@ where
     T: EqtsValue + Send,
     F: Future<Output = T> + Send + 'static,
 {
+    use futures::FutureExt as _;
     let state = Arc::new(Mutex::new(None));
     let task_state = Arc::clone(&state);
+    let (task, abort) = futures::future::abortable(async move { future.await.into_json() });
     run_future(async move {
-        let value = future.await.into_json();
+        let outcome = match std::panic::AssertUnwindSafe(task).catch_unwind().await {
+            Ok(Err(futures::future::Aborted)) => return,
+            Ok(Ok(value)) => Ok(value),
+            Err(payload) => Err(payload),
+        };
         *task_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
     });
-    register_reactive(FutureResource { state })
+    register_reactive(FutureResource { state, abort })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -511,10 +532,20 @@ pub fn poll_reactive(handle: u64) -> Result<(i32, Option<Vec<u8>>), i32> {
     if cancelled {
         return Ok((ABI_REACTIVE_DONE, None));
     }
-    let poll = resource
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .poll();
+    let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resource
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .poll()
+    }));
+    let poll = match poll {
+        Ok(poll) => poll,
+        Err(payload) => {
+            return serde_json::to_vec(&panic_message(payload.as_ref()))
+                .map(|message| (ABI_PANIC, Some(message)))
+                .map_err(|_| ABI_ENCODE_ERROR);
+        }
+    };
     match poll {
         Ok(ReactivePoll::Pending) => Ok((ABI_REACTIVE_PENDING, None)),
         Ok(ReactivePoll::Done) => Ok((ABI_REACTIVE_DONE, None)),
@@ -524,8 +555,18 @@ pub fn poll_reactive(handle: u64) -> Result<(i32, Option<Vec<u8>>), i32> {
         Ok(ReactivePoll::Callback(value)) => serde_json::to_vec(&value)
             .map(|value| (ABI_REACTIVE_CALLBACK, Some(value)))
             .map_err(|_| ABI_ENCODE_ERROR),
-        Err(error) => Ok((ABI_ENCODE_ERROR, Some(error.into_bytes()))),
+        Err(error) => serde_json::to_vec(&error)
+            .map(|error| (ABI_ENCODE_ERROR, Some(error)))
+            .map_err(|_| ABI_ENCODE_ERROR),
     }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "eqts panic".to_owned())
 }
 
 fn capabilities_from(functions: &[Function], method_sets: &[MethodSet]) -> Capabilities {
@@ -585,9 +626,50 @@ scalar_value!(u32, U32);
 scalar_value!(i8, I8);
 scalar_value!(i16, I16);
 scalar_value!(i32, I32);
-scalar_value!(f32, F32);
-scalar_value!(f64, F64);
 scalar_value!((), Void);
+
+// JSON has no NaN or Infinity, and serde_json would silently turn them into
+// null. Non-finite floats travel as the strings "NaN", "Infinity", and
+// "-Infinity", which the generated JavaScript glue encodes and decodes.
+macro_rules! float_value {
+    ($type:ty, $scalar:ident) => {
+        impl EqtsValue for $type {
+            fn schema() -> Type {
+                Type::Scalar {
+                    scalar: Scalar::$scalar,
+                }
+            }
+
+            fn from_json(value: serde_json::Value) -> Result<Self, String> {
+                match value {
+                    serde_json::Value::String(tag) => match tag.as_str() {
+                        "NaN" => Ok(<$type>::NAN),
+                        "Infinity" => Ok(<$type>::INFINITY),
+                        "-Infinity" => Ok(<$type>::NEG_INFINITY),
+                        _ => Err(format!(
+                            "expected number, NaN, Infinity, or -Infinity, got {tag:?}"
+                        )),
+                    },
+                    value => serde_json::from_value(value).map_err(|error| error.to_string()),
+                }
+            }
+
+            fn into_json(self) -> Result<serde_json::Value, String> {
+                if self.is_nan() {
+                    Ok(serde_json::Value::String("NaN".into()))
+                } else if self.is_infinite() {
+                    let tag = if self > 0.0 { "Infinity" } else { "-Infinity" };
+                    Ok(serde_json::Value::String(tag.into()))
+                } else {
+                    serde_json::to_value(self).map_err(|error| error.to_string())
+                }
+            }
+        }
+    };
+}
+
+float_value!(f32, F32);
+float_value!(f64, F64);
 
 macro_rules! integer64_value {
     ($type:ty, $scalar:ident) => {
@@ -1044,6 +1126,20 @@ mod tests {
         assert!(u64::from_json(serde_json::json!(42)).is_err());
         assert!(u64::from_json(serde_json::json!("")).is_err());
         assert!(u64::from_json(serde_json::json!("-1")).is_err());
+    }
+
+    #[test]
+    fn non_finite_floats_round_trip_through_json() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.5] {
+            let encoded = value.into_json().expect("float encodes");
+            assert!(!encoded.is_null(), "{value} must not encode as null");
+            let decoded = f64::from_json(encoded).expect("float decodes");
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
+        let encoded = f32::NEG_INFINITY.into_json().expect("f32 encodes");
+        assert_eq!(f32::from_json(encoded), Ok(f32::NEG_INFINITY));
+        assert!(f32::from_json(serde_json::Value::Null).is_err());
+        assert!(f64::from_json(serde_json::json!("1.5")).is_err());
     }
 
     #[test]

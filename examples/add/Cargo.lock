@@ -37,7 +37,7 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "eqts"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "eqts-macros",
  "futures",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "eqts-macros"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",

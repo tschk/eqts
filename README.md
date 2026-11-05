@@ -82,6 +82,13 @@ Reactive exports use web-standard TypeScript contracts. Async functions and asyn
 
 Browser Wasm is available through `--target wasm-browser` and exposes an async `initialize()` function. `--target wasm` remains the synchronous Node-compatible build. `--target all` emits both plus a consolidated conditional-exports manifest.
 
+## FFI ownership proposal
+
+The [cross-family FFI ownership contract](https://github.com/tschk/equilibrium/blob/main/docs/FFI-OWNERSHIP-PROPOSAL.md) is a proposal, not a claim that eqts conforms or interoperates with other projects. Steps toward an opt-in adapter include:
+
+- Document the `eqts_buffer_free_v1` release obligation and output ownership on every status, and test cleanup on success and error paths.
+- Document the scriptc bridge's call-scoped `emit` buffer lifetime and test that consumers copy any data retained after the callback returns.
+
 ## Compatibility
 
 eqts 0.2 requires Rust 1.88 or newer. The generated declarations are verified with TypeScript 7. Node-API uses Node 20.17 or newer through the pinned napi-rs toolchain. Native packages are designed for prebuilt artifacts and do not require install-time downloads or a consumer Rust compiler.
